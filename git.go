@@ -4,8 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/go-git/go-git/v5"
 )
 
 // ChangeType represents the type of change
@@ -69,51 +72,207 @@ const (
 	WholeFile
 )
 
+// Repository holds the git repository instance
+var repository *git.Repository
+
+// OpenRepository opens the git repository at the current directory
+func OpenRepository() error {
+	repoPath, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get working directory: %w", err)
+	}
+
+	repo, err := git.PlainOpenWithOptions(repoPath, &git.PlainOpenOptions{
+		DetectDotGit: true,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to open git repository: %w", err)
+	}
+
+	repository = repo
+	return nil
+}
+
+// GetRootPath gets the git repository root path
+func GetRootPath() (string, error) {
+	if repository == nil {
+		if err := OpenRepository(); err != nil {
+			return "", err
+		}
+	}
+
+	worktree, err := repository.Worktree()
+	if err != nil {
+		return "", fmt.Errorf("failed to get worktree: %w", err)
+	}
+
+	return worktree.Filesystem.Root(), nil
+}
+
+// GetCurrentBranch gets the current git branch
+func GetCurrentBranch() (string, error) {
+	if repository == nil {
+		if err := OpenRepository(); err != nil {
+			return "", err
+		}
+	}
+
+	ref, err := repository.Head()
+	if err != nil {
+		return "", fmt.Errorf("failed to get HEAD: %w", err)
+	}
+
+	if ref.Name().IsBranch() {
+		return ref.Name().Short(), nil
+	}
+
+	// Detached HEAD state, return the commit hash
+	return ref.Hash().String()[:7], nil
+}
+
+// GetChangedFiles gets a list of changed files (for tree view)
+func GetChangedFiles(mode DiffMode) ([]FileDiff, error) {
+	if repository == nil {
+		if err := OpenRepository(); err != nil {
+			return nil, err
+		}
+	}
+
+	worktree, err := repository.Worktree()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get worktree: %w", err)
+	}
+
+	status, err := worktree.Status()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get status: %w", err)
+	}
+
+	// Collect paths and sort them for stable ordering
+	paths := make([]string, 0, len(status))
+	for path := range status {
+		paths = append(paths, path)
+	}
+	// Sort paths to ensure consistent order
+	for i := 0; i < len(paths); i++ {
+		for j := i + 1; j < len(paths); j++ {
+			if paths[i] > paths[j] {
+				paths[i], paths[j] = paths[j], paths[i]
+			}
+		}
+	}
+
+	var files []FileDiff
+	for _, path := range paths {
+		fileStatus := status[path]
+		var changeType ChangeType
+		var statusCode string
+
+		if mode == Staged {
+			statusCode = string(fileStatus.Staging)
+			// Skip unstaged-only changes
+			if fileStatus.Staging == git.Unmodified {
+				continue
+			}
+		} else {
+			statusCode = string(fileStatus.Worktree)
+			// Skip staged-only changes
+			if fileStatus.Worktree == git.Unmodified {
+				continue
+			}
+		}
+
+		switch statusCode {
+		case "M":
+			changeType = Modified
+		case "A":
+			changeType = Added
+		case "D":
+			changeType = Deleted
+		case "R":
+			changeType = Renamed
+		default:
+			changeType = Modified
+		}
+
+		files = append(files, FileDiff{
+			Path:         path,
+			ChangeType:   changeType,
+			Hunks:        []Hunk{},
+			LinesAdded:   0,
+			LinesRemoved: 0,
+		})
+	}
+
+	return files, nil
+}
+
 // GetDiff gets the git diff based on mode
+// For complex diff operations, we use git CLI as fallback
 func GetDiff(mode DiffMode, viewMode DiffViewMode) ([]FileDiff, error) {
+	if repository == nil {
+		if err := OpenRepository(); err != nil {
+			return nil, err
+		}
+	}
+
+	// Use the git CLI fallback for now as go-git's diff generation is limited
+	// This ensures compatibility while we fully migrate to go-git
+	return getDiffAlternative(mode, viewMode)
+}
+
+// getDiffAlternative uses git diff command output parsing
+func getDiffAlternative(mode DiffMode, viewMode DiffViewMode) ([]FileDiff, error) {
 	unified := "5"
 	if viewMode == WholeFile {
 		unified = "999999"
 	}
 
-	var cmd *exec.Cmd
+	var args []string
 	if mode == Staged {
-		cmd = exec.Command("git", "diff", "--cached", "--unified="+unified)
+		args = []string{"diff", "--cached", "--unified=" + unified}
 	} else {
-		cmd = exec.Command("git", "diff", "--unified="+unified)
+		args = []string{"diff", "--unified=" + unified}
 	}
 
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	if err := cmd.Run(); err != nil {
+	output, err := runGitCommand(args...)
+	if err != nil {
 		return nil, fmt.Errorf("failed to get git diff: %w", err)
 	}
 
-	return parseDiff(out.String())
+	return parseDiff(output)
 }
 
-// GetChangedFiles gets a list of changed files (for tree view)
-func GetChangedFiles(mode DiffMode) ([]FileDiff, error) {
-	var cmd *exec.Cmd
-	if mode == Staged {
-		cmd = exec.Command("git", "diff", "--cached", "--name-status")
-	} else {
-		cmd = exec.Command("git", "diff", "--name-status")
+// runGitCommand runs a git command and returns the output
+func runGitCommand(args ...string) (string, error) {
+	worktree, err := repository.Worktree()
+	if err != nil {
+		return "", fmt.Errorf("failed to get worktree: %w", err)
 	}
+
+	// Get the repository path
+	repoPath := worktree.Filesystem.Root()
+
+	// Build command with proper quoting
+	cmdArgs := append([]string{"-C", repoPath}, args...)
+	cmd := exec.Command("git", cmdArgs...)
 
 	var out bytes.Buffer
+	var stderr bytes.Buffer
 	cmd.Stdout = &out
+	cmd.Stderr = &stderr
+
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("failed to get changed files: %w", err)
+		return "", fmt.Errorf("git command failed: %w, stderr: %s", err, stderr.String())
 	}
 
-	return parseChangedFiles(out.String())
+	return out.String(), nil
 }
 
 // parseDiff parses git diff output
-func parseDiff(diff string) ([]FileDiff, error) {
+func parseDiff(diffStr string) ([]FileDiff, error) {
 	var files []FileDiff
-	scanner := bufio.NewScanner(strings.NewReader(diff))
+	scanner := bufio.NewScanner(strings.NewReader(diffStr))
 
 	var currentFile *FileDiff
 	var currentHunk *Hunk
@@ -204,67 +363,4 @@ func parseDiff(diff string) ([]FileDiff, error) {
 	}
 
 	return files, scanner.Err()
-}
-
-// parseChangedFiles parses git diff --name-status output
-func parseChangedFiles(output string) ([]FileDiff, error) {
-	var files []FileDiff
-	scanner := bufio.NewScanner(strings.NewReader(output))
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		parts := strings.Fields(line)
-		if len(parts) < 2 {
-			continue
-		}
-
-		status := parts[0]
-		path := parts[1]
-
-		var changeType ChangeType
-		switch status {
-		case "M":
-			changeType = Modified
-		case "A":
-			changeType = Added
-		case "D":
-			changeType = Deleted
-		case "R":
-			changeType = Renamed
-		default:
-			changeType = Modified
-		}
-
-		files = append(files, FileDiff{
-			Path:         path,
-			ChangeType:   changeType,
-			Hunks:        []Hunk{},
-			LinesAdded:   0,
-			LinesRemoved: 0,
-		})
-	}
-
-	return files, scanner.Err()
-}
-
-// GetRootPath gets the git repository root path
-func GetRootPath() (string, error) {
-	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("failed to get git root: %w", err)
-	}
-	return strings.TrimSpace(out.String()), nil
-}
-
-// GetCurrentBranch gets the current git branch
-func GetCurrentBranch() (string, error) {
-	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("failed to get current branch: %w", err)
-	}
-	return strings.TrimSpace(out.String()), nil
 }

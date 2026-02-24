@@ -3,15 +3,14 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
 
 func main() {
-	// Check if we're in a git repository
-	if !isGitRepo() {
-		fmt.Println("Error: Not a git repository")
+	// Initialize git repository
+	if err := OpenRepository(); err != nil {
+		fmt.Printf("Error: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -30,9 +29,4 @@ func main() {
 		fmt.Printf("Error: %v", err)
 		os.Exit(1)
 	}
-}
-
-func isGitRepo() bool {
-	cmd := exec.Command("git", "rev-parse", "--git-dir")
-	return cmd.Run() == nil
 }
