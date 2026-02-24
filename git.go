@@ -3,11 +3,13 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/go-git/go-git/v5"
 )
@@ -78,6 +80,8 @@ const (
 	DefaultDiffContext = 5
 	// WholeFileContext is a large number to show whole file in diff
 	WholeFileContext = 999999
+	// GitCommandTimeout is the default timeout for git operations
+	GitCommandTimeout = 30 * time.Second
 )
 
 // Repository holds the git repository instance
@@ -134,8 +138,12 @@ func GetCurrentBranch() (string, error) {
 		return ref.Name().Short(), nil
 	}
 
-	// Detached HEAD state, return the commit hash
-	return ref.Hash().String()[:7], nil
+	// Detached HEAD state, return the commit hash (shortened)
+	hashStr := ref.Hash().String()
+	if len(hashStr) > 7 {
+		return hashStr[:7], nil
+	}
+	return hashStr, nil
 }
 
 // GetChangedFiles gets a list of changed files (for tree view)
@@ -223,6 +231,10 @@ func GetDiff(mode DiffMode, viewMode DiffViewMode) ([]FileDiff, error) {
 
 // getDiffAlternative uses git diff command output parsing
 func getDiffAlternative(mode DiffMode, viewMode DiffViewMode) ([]FileDiff, error) {
+	// Create context with timeout for git operations
+	ctx, cancel := context.WithTimeout(context.Background(), GitCommandTimeout)
+	defer cancel()
+
 	unified := fmt.Sprintf("%d", DefaultDiffContext)
 	if viewMode == WholeFile {
 		unified = fmt.Sprintf("%d", WholeFileContext)
@@ -235,7 +247,7 @@ func getDiffAlternative(mode DiffMode, viewMode DiffViewMode) ([]FileDiff, error
 		args = []string{"diff", "--unified=" + unified}
 	}
 
-	output, err := runGitCommand(args...)
+	output, err := runGitCommand(ctx, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get git diff (mode=%v): %w", mode, err)
 	}
@@ -243,8 +255,8 @@ func getDiffAlternative(mode DiffMode, viewMode DiffViewMode) ([]FileDiff, error
 	return parseDiff(output)
 }
 
-// runGitCommand runs a git command and returns the output
-func runGitCommand(args ...string) (string, error) {
+// runGitCommand runs a git command with context and returns the output
+func runGitCommand(ctx context.Context, args ...string) (string, error) {
 	worktree, err := repository.Worktree()
 	if err != nil {
 		return "", fmt.Errorf("failed to get worktree: %w", err)
@@ -255,7 +267,7 @@ func runGitCommand(args ...string) (string, error) {
 
 	// Build command with proper quoting
 	cmdArgs := append([]string{"-C", repoPath}, args...)
-	cmd := exec.Command("git", cmdArgs...)
+	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
 
 	var out bytes.Buffer
 	var stderr bytes.Buffer
@@ -329,29 +341,46 @@ func parseDiff(diffStr string) ([]FileDiff, error) {
 				currentHunk = &Hunk{
 					Lines: []DiffLine{},
 				}
-				fmt.Sscanf(line, "@@ -%d,%d +%d,%d @@", &currentHunk.OldStart, &currentHunk.OldCount, &currentHunk.NewStart, &currentHunk.NewCount)
+				_, err := fmt.Sscanf(line, "@@ -%d,%d +%d,%d @@", &currentHunk.OldStart, &currentHunk.OldCount, &currentHunk.NewStart, &currentHunk.NewCount)
+				if err != nil {
+					// If parsing fails, set reasonable defaults
+					currentHunk.OldStart = 1
+					currentHunk.OldCount = 1
+					currentHunk.NewStart = 1
+					currentHunk.NewCount = 1
+				}
 			}
-		} else if currentHunk != nil {
-			// Parse diff lines
+		} else if currentHunk != nil && currentFile != nil {
+			// Parse diff lines - only if we have both hunk and file
 			var lineType LineType
 			var content string
-			if strings.HasPrefix(line, "+") {
-				lineType = LineAdded
-				content = strings.TrimPrefix(line, "+")
-				currentFile.LinesAdded++
-			} else if strings.HasPrefix(line, "-") {
-				lineType = LineRemoved
-				content = strings.TrimPrefix(line, "-")
-				currentFile.LinesRemoved++
-			} else {
-				lineType = LineContext
-				content = strings.TrimPrefix(line, " ")
+			if len(line) > 0 {
+				switch line[0] {
+				case '+':
+					lineType = LineAdded
+					content = line[1:]
+					currentFile.LinesAdded++
+				case '-':
+					lineType = LineRemoved
+					content = line[1:]
+					currentFile.LinesRemoved++
+				default:
+					lineType = LineContext
+					if len(line) > 0 {
+						content = line[1:]
+					}
+				}
 			}
 			currentHunk.Lines = append(currentHunk.Lines, DiffLine{
 				Type:    lineType,
 				Content: content,
 			})
 		}
+	}
+
+	// Check for scanner errors before returning
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("error parsing diff: %w", err)
 	}
 
 	if currentFile != nil {
@@ -362,5 +391,5 @@ func parseDiff(diffStr string) ([]FileDiff, error) {
 		files = append(files, *currentFile)
 	}
 
-	return files, scanner.Err()
+	return files, nil
 }
