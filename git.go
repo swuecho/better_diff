@@ -1,17 +1,16 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
-	"context"
 	"fmt"
+	"io"
 	"os"
-	"os/exec"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing/format/index"
+	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
 // ChangeType represents the type of change
@@ -80,8 +79,6 @@ const (
 	DefaultDiffContext = 5
 	// WholeFileContext is a large number to show whole file in diff
 	WholeFileContext = 999999
-	// GitCommandTimeout is the default timeout for git operations
-	GitCommandTimeout = 30 * time.Second
 )
 
 // Repository holds the git repository instance
@@ -216,9 +213,7 @@ func GetChangedFiles(mode DiffMode) ([]FileDiff, error) {
 	return files, nil
 }
 
-// GetDiff gets the git diff based on mode
-// Uses git CLI for diff generation as it provides better compatibility
-// with various edge cases than go-git's diff implementation
+// GetDiff gets the git diff based on mode using go-git
 func GetDiff(mode DiffMode, viewMode DiffViewMode) ([]FileDiff, error) {
 	if repository == nil {
 		if err := OpenRepository(); err != nil {
@@ -226,170 +221,252 @@ func GetDiff(mode DiffMode, viewMode DiffViewMode) ([]FileDiff, error) {
 		}
 	}
 
-	return getDiffAlternative(mode, viewMode)
-}
-
-// getDiffAlternative uses git diff command output parsing
-func getDiffAlternative(mode DiffMode, viewMode DiffViewMode) ([]FileDiff, error) {
-	// Create context with timeout for git operations
-	ctx, cancel := context.WithTimeout(context.Background(), GitCommandTimeout)
-	defer cancel()
-
-	unified := fmt.Sprintf("%d", DefaultDiffContext)
-	if viewMode == WholeFile {
-		unified = fmt.Sprintf("%d", WholeFileContext)
-	}
-
-	var args []string
-	if mode == Staged {
-		args = []string{"diff", "--cached", "--unified=" + unified}
-	} else {
-		args = []string{"diff", "--unified=" + unified}
-	}
-
-	output, err := runGitCommand(ctx, args...)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get git diff (mode=%v): %w", mode, err)
-	}
-
-	return parseDiff(output)
-}
-
-// runGitCommand runs a git command with context and returns the output
-func runGitCommand(ctx context.Context, args ...string) (string, error) {
 	worktree, err := repository.Worktree()
 	if err != nil {
-		return "", fmt.Errorf("failed to get worktree: %w", err)
+		return nil, fmt.Errorf("failed to get worktree: %w", err)
 	}
 
-	// Get the repository path
-	repoPath := worktree.Filesystem.Root()
-
-	// Build command with proper quoting
-	cmdArgs := append([]string{"-C", repoPath}, args...)
-	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
-
-	var out bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("git command %v failed: %w, stderr: %s", args, err, stderr.String())
+	// Get HEAD commit for comparison
+	head, err := repository.Head()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get HEAD: %w", err)
 	}
 
-	return out.String(), nil
-}
+	headCommit, err := repository.CommitObject(head.Hash())
+	if err != nil {
+		return nil, fmt.Errorf("failed to get HEAD commit: %w", err)
+	}
 
-// parseDiff parses git diff output
-func parseDiff(diffStr string) ([]FileDiff, error) {
+	// Get status to find changed files
+	status, err := worktree.Status()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get git status: %w", err)
+	}
+
 	var files []FileDiff
-	scanner := bufio.NewScanner(strings.NewReader(diffStr))
 
-	var currentFile *FileDiff
-	var currentHunk *Hunk
+	// Collect and sort paths for stable ordering
+	paths := make([]string, 0, len(status))
+	for path := range status {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
 
-	for scanner.Scan() {
-		line := scanner.Text()
-
-		// Check for new file
-		if strings.HasPrefix(line, "diff --git") {
-			if currentFile != nil {
-				// Append the last hunk if there is one
-				if currentHunk != nil {
-					currentFile.Hunks = append(currentFile.Hunks, *currentHunk)
-					currentHunk = nil
-				}
-				files = append(files, *currentFile)
-			}
-			currentFile = &FileDiff{
-				Hunks:        []Hunk{},
-				LinesAdded:   0,
-				LinesRemoved: 0,
-			}
-
-			// Extract file path from "diff --git a/path b/path"
-			parts := strings.Fields(line)
-			if len(parts) >= 4 {
-				// Use parts[3] which is "b/path" and remove the "b/" prefix
-				currentFile.Path = strings.TrimPrefix(parts[3], "b/")
-			}
-		} else if strings.HasPrefix(line, "new file") {
-			if currentFile != nil {
-				currentFile.ChangeType = Added
-			}
-		} else if strings.HasPrefix(line, "deleted file") {
-			if currentFile != nil {
-				currentFile.ChangeType = Deleted
-			}
-		} else if strings.HasPrefix(line, "rename from") {
-			if currentFile != nil {
-				currentFile.OldPath = strings.TrimPrefix(line, "rename from ")
-				currentFile.ChangeType = Renamed
-			}
-		} else if strings.HasPrefix(line, "rename to") {
-			if currentFile != nil {
-				currentFile.Path = strings.TrimPrefix(line, "rename to ")
-			}
-		} else if strings.HasPrefix(line, "@@") {
-			// Parse hunk header: @@ -old_start,old_count +new_start,new_count @@
-			if currentFile != nil {
-				// If there's a previous hunk, append it first
-				if currentHunk != nil {
-					currentFile.Hunks = append(currentFile.Hunks, *currentHunk)
-				}
-				currentHunk = &Hunk{
-					Lines: []DiffLine{},
-				}
-				_, err := fmt.Sscanf(line, "@@ -%d,%d +%d,%d @@", &currentHunk.OldStart, &currentHunk.OldCount, &currentHunk.NewStart, &currentHunk.NewCount)
-				if err != nil {
-					// If parsing fails, set reasonable defaults
-					currentHunk.OldStart = 1
-					currentHunk.OldCount = 1
-					currentHunk.NewStart = 1
-					currentHunk.NewCount = 1
-				}
-			}
-		} else if currentHunk != nil && currentFile != nil {
-			// Parse diff lines - only if we have both hunk and file
-			var lineType LineType
-			var content string
-			if len(line) > 0 {
-				switch line[0] {
-				case '+':
-					lineType = LineAdded
-					content = line[1:]
-					currentFile.LinesAdded++
-				case '-':
-					lineType = LineRemoved
-					content = line[1:]
-					currentFile.LinesRemoved++
-				default:
-					lineType = LineContext
-					if len(line) > 0 {
-						content = line[1:]
-					}
-				}
-			}
-			currentHunk.Lines = append(currentHunk.Lines, DiffLine{
-				Type:    lineType,
-				Content: content,
-			})
-		}
+	// Get the index for staging area contents
+	idx, err := repository.Storer.Index()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get index: %w", err)
 	}
 
-	// Check for scanner errors before returning
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("error parsing diff: %w", err)
-	}
+	for _, path := range paths {
+		fileStatus := status[path]
 
-	if currentFile != nil {
-		// Append the last hunk if there is one
-		if currentHunk != nil {
-			currentFile.Hunks = append(currentFile.Hunks, *currentHunk)
+		// Check if this file is relevant for the current mode
+		var relevantChange bool
+		if mode == Staged {
+			relevantChange = fileStatus.Staging != git.Unmodified
+		} else {
+			relevantChange = fileStatus.Worktree != git.Unmodified
 		}
-		files = append(files, *currentFile)
+
+		if !relevantChange {
+			continue
+		}
+
+		fileDiff, err := getFileDiff(worktree, idx, headCommit, path, mode, *fileStatus)
+		if err != nil {
+			// Log error but continue with other files
+			continue
+		}
+
+		if fileDiff != nil {
+			files = append(files, *fileDiff)
+		}
 	}
 
 	return files, nil
+}
+
+// getFileDiff generates a FileDiff for a single file using go-git
+func getFileDiff(worktree *git.Worktree, idx *index.Index, headCommit *object.Commit, path string, mode DiffMode, fileStatus git.FileStatus) (*FileDiff, error) {
+	var oldContent, newContent []byte
+	var changeType ChangeType
+
+	// Determine change type
+	var statusCode string
+	if mode == Staged {
+		statusCode = string(fileStatus.Staging)
+	} else {
+		statusCode = string(fileStatus.Worktree)
+	}
+
+	switch statusCode {
+	case "M":
+		changeType = Modified
+	case "A":
+		changeType = Added
+	case "D":
+		changeType = Deleted
+	case "R":
+		changeType = Renamed
+	default:
+		changeType = Modified
+	}
+
+	if mode == Staged {
+		// Staged: compare index vs HEAD
+		// Get old content from HEAD
+		oldFile, err := headCommit.File(path)
+		if err == nil {
+			oldReader, err := oldFile.Reader()
+			if err == nil {
+				oldContent, _ = readAll(oldReader)
+				oldReader.Close()
+			}
+		}
+
+		// Get new content from index
+		for _, entry := range idx.Entries {
+			if entry.Name == path {
+				newBlob, err := object.GetBlob(repository.Storer, entry.Hash)
+				if err == nil {
+					newReader, err := newBlob.Reader()
+					if err == nil {
+						newContent, _ = readAll(newReader)
+						newReader.Close()
+					}
+				}
+				break
+			}
+		}
+	} else {
+		// Unstaged: compare worktree vs index
+		// Get old content from index
+		for _, entry := range idx.Entries {
+			if entry.Name == path {
+				oldBlob, err := object.GetBlob(repository.Storer, entry.Hash)
+				if err == nil {
+					oldReader, err := oldBlob.Reader()
+					if err == nil {
+						oldContent, _ = readAll(oldReader)
+						oldReader.Close()
+					}
+				}
+				break
+			}
+		}
+
+		// Get new content from worktree
+		worktreeFile, err := worktree.Filesystem.Open(path)
+		if err == nil {
+			newContent, _ = readAll(worktreeFile)
+			worktreeFile.Close()
+		}
+		// If file doesn't exist, newContent remains nil (deleted)
+	}
+
+	// Generate diff patch using text diff
+	fileDiff := &FileDiff{
+		Path:         path,
+		ChangeType:   changeType,
+		Hunks:        []Hunk{},
+		LinesAdded:   0,
+		LinesRemoved: 0,
+	}
+
+	// Generate hunks from diff
+	oldLines := strings.Split(string(oldContent), "\n")
+	newLines := strings.Split(string(newContent), "\n")
+
+	hunks := computeHunks(oldLines, newLines)
+	fileDiff.Hunks = hunks
+
+	// Count lines
+	for _, hunk := range hunks {
+		for _, line := range hunk.Lines {
+			if line.Type == LineAdded {
+				fileDiff.LinesAdded++
+			} else if line.Type == LineRemoved {
+				fileDiff.LinesRemoved++
+			}
+		}
+	}
+
+	return fileDiff, nil
+}
+
+// computeHunks computes diff hunks using a simple line-by-line comparison
+func computeHunks(oldLines, newLines []string) []Hunk {
+	var hunks []Hunk
+	var currentHunk *Hunk
+
+	oldLen := len(oldLines)
+	newLen := len(newLines)
+	maxLen := oldLen
+	if newLen > maxLen {
+		maxLen = newLen
+	}
+
+	// Simple line-by-line diff (not optimal but works for basic cases)
+	for i := 0; i < maxLen; i++ {
+		oldLine := ""
+		newLine := ""
+
+		if i < oldLen {
+			oldLine = oldLines[i]
+		}
+		if i < newLen {
+			newLine = newLines[i]
+		}
+
+		if oldLine == newLine {
+			// Context line
+			if currentHunk != nil && len(currentHunk.Lines) > 0 {
+				// Add context to existing hunk
+				currentHunk.Lines = append(currentHunk.Lines, DiffLine{
+					Type:    LineContext,
+					Content: oldLine,
+				})
+			}
+		} else {
+			// Difference detected
+			if currentHunk == nil {
+				currentHunk = &Hunk{
+					Lines: []DiffLine{},
+				}
+			}
+
+			// Add old line if exists (deletion)
+			if i < oldLen {
+				currentHunk.Lines = append(currentHunk.Lines, DiffLine{
+					Type:    LineRemoved,
+					Content: oldLine,
+				})
+			}
+
+			// Add new line if exists (addition)
+			if i < newLen {
+				currentHunk.Lines = append(currentHunk.Lines, DiffLine{
+					Type:    LineAdded,
+					Content: newLine,
+				})
+			}
+		}
+	}
+
+	if currentHunk != nil {
+		hunks = append(hunks, *currentHunk)
+	}
+
+	return hunks
+}
+
+// readAll reads all content from an io.Reader
+func readAll(r io.Reader) ([]byte, error) {
+	b := new(bytes.Buffer)
+	_, err := b.ReadFrom(r)
+	if err != nil {
+		return nil, err
+	}
+	return b.Bytes(), nil
 }
