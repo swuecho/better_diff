@@ -36,13 +36,15 @@ type Model struct {
 
 // TreeNode represents a node in the file tree
 type TreeNode struct {
-	name      string
-	path      string
-	isDir     bool
+	name       string
+	path       string
+	isDir      bool
 	isExpanded bool
-	children  []TreeNode
+	children   []TreeNode
 	changeType ChangeType
-	depth     int
+	depth      int
+	linesAdded int
+	linesRemoved int
 }
 
 // NewModel creates a new model

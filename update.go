@@ -39,6 +39,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 
+		case "pgup":
+			if m.panel == DiffPanel {
+				m.moveDiffPageUp()
+			} else {
+				m.movePageUp()
+			}
+			return m, nil
+
+		case "pgdown":
+			if m.panel == DiffPanel {
+				m.moveDiffPageDown()
+			} else {
+				m.movePageDown()
+			}
+			return m, nil
+
 		case "tab":
 			// Don't allow switching to file tree panel in whole file mode
 			if m.diffViewMode == WholeFile {
@@ -69,6 +85,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.scrollOffset = 0
 			m.diffScroll = 0
 			m.diffFiles = nil
+			m.files = nil // Clear to force reload
 			return m, m.LoadFiles()
 
 		case "f":
@@ -125,9 +142,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 
 	case diffLoadedMsg:
-		// Only append if the file has actual content (not empty)
+		// Only add if the file has actual content (not empty)
 		if msg.file.Path != "" {
-			m.diffFiles = append(m.diffFiles, msg.file)
+			// Check if file already exists and replace it, otherwise append
+			found := false
+			for i := range m.diffFiles {
+				if m.diffFiles[i].Path == msg.file.Path {
+					m.diffFiles[i] = msg.file
+					found = true
+					break
+				}
+			}
+			if !found {
+				m.diffFiles = append(m.diffFiles, msg.file)
+			}
 		}
 		return m, nil
 
@@ -168,6 +196,44 @@ func (m *Model) moveDown() {
 	}
 }
 
+// movePageUp moves the selection up by a page
+func (m *Model) movePageUp() {
+	visibleHeight := m.height - 3
+	if visibleHeight < 1 {
+		visibleHeight = 1
+	}
+
+	// Move selection up by a page
+	m.selectedIndex -= visibleHeight
+	if m.selectedIndex < 0 {
+		m.selectedIndex = 0
+	}
+
+	// Adjust scroll offset
+	if m.selectedIndex < m.scrollOffset {
+		m.scrollOffset = m.selectedIndex
+	}
+}
+
+// movePageDown moves the selection down by a page
+func (m *Model) movePageDown() {
+	visibleHeight := m.height - 3
+	if visibleHeight < 1 {
+		visibleHeight = 1
+	}
+
+	maxIndex := len(m.flattenTree()) - 1
+	m.selectedIndex += visibleHeight
+	if m.selectedIndex > maxIndex {
+		m.selectedIndex = maxIndex
+	}
+
+	// Auto scroll if needed
+	if m.selectedIndex >= m.scrollOffset+visibleHeight {
+		m.scrollOffset = m.selectedIndex - visibleHeight + 1
+	}
+}
+
 // moveDiffUp scrolls the diff view up
 func (m *Model) moveDiffUp() {
 	if m.diffScroll > 0 {
@@ -184,6 +250,40 @@ func (m *Model) moveDiffDown() {
 	if m.diffScroll < totalLines-visibleHeight {
 		m.diffScroll++
 	}
+}
+
+// moveDiffPageUp scrolls the diff view up by a page
+func (m *Model) moveDiffPageUp() {
+	visibleHeight := m.height - 3
+	if visibleHeight < 1 {
+		visibleHeight = 1
+	}
+
+	m.diffScroll -= visibleHeight
+	if m.diffScroll < 0 {
+		m.diffScroll = 0
+	}
+}
+
+// moveDiffPageDown scrolls the diff view down by a page
+func (m *Model) moveDiffPageDown() {
+	visibleHeight := m.height - 3
+	if visibleHeight < 1 {
+		visibleHeight = 1
+	}
+
+	totalLines := m.getDiffLineCount()
+	m.diffScroll += visibleHeight
+	if m.diffScroll > totalLines-visibleHeight {
+		m.diffScroll = max(0, totalLines-visibleHeight)
+	}
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // getDiffLineCount returns the total number of lines in the current diff
@@ -267,6 +367,9 @@ func flattenTree(nodes []TreeNode, depth int) []TreeNode {
 
 // buildFileTree builds the file tree from the list of changed files
 func (m *Model) buildFileTree() {
+	// Clear previous tree
+	m.fileTree = nil
+
 	root := &dirNode{
 		subdirs: make(map[string]*dirNode),
 	}
@@ -308,23 +411,29 @@ func buildTreeNodes(dir *dirNode, depth int) []TreeNode {
 
 	// Add subdirectories first
 	for _, subdir := range dir.subdirs {
+		childNodes := buildTreeNodes(subdir, depth+1)
+		totalAdded, totalRemoved := getDirStats(subdir)
 		nodes = append(nodes, TreeNode{
-			name:      subdir.name,
-			path:      subdir.path,
-			isDir:     true,
-			isExpanded: false,
-			children:  buildTreeNodes(subdir, depth+1),
-			changeType: getDirChangeType(subdir),
+			name:        subdir.name,
+			path:        subdir.path,
+			isDir:       true,
+			isExpanded:  false,
+			children:    childNodes,
+			changeType:  getDirChangeType(subdir),
+			linesAdded:  totalAdded,
+			linesRemoved: totalRemoved,
 		})
 	}
 
 	// Add files
 	for _, file := range dir.files {
 		nodes = append(nodes, TreeNode{
-			name:       getFileName(file.Path),
-			path:       file.Path,
-			isDir:      false,
-			changeType: file.ChangeType,
+			name:         getFileName(file.Path),
+			path:         file.Path,
+			isDir:        false,
+			changeType:   file.ChangeType,
+			linesAdded:   file.LinesAdded,
+			linesRemoved: file.LinesRemoved,
 		})
 	}
 
@@ -359,6 +468,20 @@ func getDirChangeType(dir *dirNode) ChangeType {
 		return Deleted
 	}
 	return Modified
+}
+
+func getDirStats(dir *dirNode) (added int, removed int) {
+	// Calculate total stats for directory
+	for _, file := range dir.files {
+		added += file.LinesAdded
+		removed += file.LinesRemoved
+	}
+	for _, subdir := range dir.subdirs {
+		subAdded, subRemoved := getDirStats(subdir)
+		added += subAdded
+		removed += subRemoved
+	}
+	return added, removed
 }
 
 func splitPath(path string) []string {
@@ -435,4 +558,14 @@ func computeFileHash(files []FileDiff) string {
 		result += f.Path + string(rune(f.ChangeType))
 	}
 	return result
+}
+
+// GetTotalStats returns total lines added and removed across all files
+func (m Model) GetTotalStats() (files int, added int, removed int) {
+	for _, f := range m.diffFiles {
+		files++
+		added += f.LinesAdded
+		removed += f.LinesRemoved
+	}
+	return files, added, removed
 }

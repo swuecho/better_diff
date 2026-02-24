@@ -74,6 +74,24 @@ func (m Model) renderHeader() string {
 		Bold(true)
 	parts = append(parts, viewModeStyle.Render("["+viewModeText+"]"))
 
+	// Add summary statistics
+	files, added, removed := m.GetTotalStats()
+	if files > 0 {
+		var stats string
+		if added > 0 && removed > 0 {
+			stats = fmt.Sprintf("%d files, +%d/-%d", files, added, removed)
+		} else if added > 0 {
+			stats = fmt.Sprintf("%d files, +%d", files, added)
+		} else if removed > 0 {
+			stats = fmt.Sprintf("%d files, -%d", files, removed)
+		} else {
+			stats = fmt.Sprintf("%d files", files)
+		}
+		statsStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("244"))
+		parts = append(parts, statsStyle.Render("("+stats+")"))
+	}
+
 	// Join with spacing
 	header := strings.Join(parts, " ")
 
@@ -120,20 +138,23 @@ func (m Model) renderFileTree(width, height int) string {
 	deletedStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("203")) // Soft red matching diff panel
 
+	statsStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("244")) // Subtle gray for stats
+
 	selectedStyle := lipgloss.NewStyle().
 		Background(lipgloss.Color("235")).
 		Width(width - 2)
 
 	// Calculate internal content height
-	contentHeight := height - 2
-	if contentHeight < 0 {
-		contentHeight = 0
+	internalHeight := height - 2
+	if internalHeight < 0 {
+		internalHeight = 0
 	}
 
 	// Get visible nodes
 	flatTree := m.flattenTree()
 	start := m.scrollOffset
-	end := min(start+contentHeight, len(flatTree))
+	end := min(start+internalHeight, len(flatTree))
 	if start > len(flatTree) {
 		start = len(flatTree)
 	}
@@ -197,6 +218,19 @@ func (m Model) renderFileTree(width, height int) string {
 		}
 
 		line := prefix + indicator + " " + text
+
+		// Add line statistics for non-dir nodes
+		if !node.isDir && (node.linesAdded > 0 || node.linesRemoved > 0) {
+			stats := ""
+			if node.linesAdded > 0 && node.linesRemoved > 0 {
+				stats = fmt.Sprintf(" +%d/-%d", node.linesAdded, node.linesRemoved)
+			} else if node.linesAdded > 0 {
+				stats = fmt.Sprintf(" +%d", node.linesAdded)
+			} else if node.linesRemoved > 0 {
+				stats = fmt.Sprintf(" -%d", node.linesRemoved)
+			}
+			line += statsStyle.Render(stats)
+		}
 
 		if isSelected && m.panel == FileTreePanel {
 			line = selectedStyle.Render(line)
@@ -319,9 +353,9 @@ func (m Model) renderDiffPanel(width, height int) string {
 	}
 
 	// Apply scrolling
-	contentHeight := height - 2 // Account for borders
-	if contentHeight < 0 {
-		contentHeight = 0
+	internalHeight := height - 2 // Account for borders
+	if internalHeight < 0 {
+		internalHeight = 0
 	}
 
 	start := m.diffScroll
@@ -331,7 +365,7 @@ func (m Model) renderDiffPanel(width, height int) string {
 	if start > len(allLines) {
 		start = len(allLines)
 	}
-	end := min(start+contentHeight, len(allLines))
+	end := min(start+internalHeight, len(allLines))
 
 	var lines []string
 	if start < len(allLines) && end > start {
@@ -339,7 +373,7 @@ func (m Model) renderDiffPanel(width, height int) string {
 	}
 
 	// Pad to exact content height
-	for len(lines) < contentHeight {
+	for len(lines) < internalHeight {
 		lines = append(lines, "")
 	}
 
@@ -377,6 +411,7 @@ func (m Model) renderFooter() string {
 	// Build help text
 	help := []string{
 		keyStyle.Render("[↑↓]") + " Navigate",
+		keyStyle.Render("[PgUp/PgDn]") + " Page",
 		keyStyle.Render("[Enter]") + " Select/Expand",
 		keyStyle.Render("[Tab]") + " Switch Panel",
 		keyStyle.Render("[s]") + " Staged/Unstaged",

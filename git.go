@@ -24,6 +24,8 @@ type FileDiff struct {
 	OldPath    string // for renames
 	ChangeType ChangeType
 	Hunks      []Hunk
+	LinesAdded int
+	LinesRemoved int
 }
 
 // Hunk represents a section of changes
@@ -130,7 +132,9 @@ func parseDiff(diff string) ([]FileDiff, error) {
 				files = append(files, *currentFile)
 			}
 			currentFile = &FileDiff{
-				Hunks: []Hunk{},
+				Hunks:        []Hunk{},
+				LinesAdded:   0,
+				LinesRemoved: 0,
 			}
 
 			// Extract file path from "diff --git a/path b/path"
@@ -175,9 +179,11 @@ func parseDiff(diff string) ([]FileDiff, error) {
 			if strings.HasPrefix(line, "+") {
 				lineType = LineAdded
 				content = strings.TrimPrefix(line, "+")
+				currentFile.LinesAdded++
 			} else if strings.HasPrefix(line, "-") {
 				lineType = LineRemoved
 				content = strings.TrimPrefix(line, "-")
+				currentFile.LinesRemoved++
 			} else {
 				lineType = LineContext
 				content = strings.TrimPrefix(line, " ")
@@ -230,9 +236,11 @@ func parseChangedFiles(output string) ([]FileDiff, error) {
 		}
 
 		files = append(files, FileDiff{
-			Path:       path,
-			ChangeType: changeType,
-			Hunks:      []Hunk{},
+			Path:         path,
+			ChangeType:   changeType,
+			Hunks:        []Hunk{},
+			LinesAdded:   0,
+			LinesRemoved: 0,
 		})
 	}
 
