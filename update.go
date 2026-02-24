@@ -69,37 +69,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		return m, nil
+		return m, tea.Tick(time.Second*2, func(t time.Time) tea.Msg {
+			return TickMsg{time: t.Second()}
+		})
 
-	case gitInfoMsg:
-		m.rootPath = msg.rootPath
-		m.branch = msg.branch
-		return m, nil
-
-	case filesLoadedMsg:
-		m.files = msg.files
-		m.buildFileTree()
-		return m, nil
-
-	case allDiffsLoadedMsg:
-		m.diffFiles = msg.files
-		return m, nil
-
-	case diffLoadedMsg:
-		// Only append if the file has actual content (not empty)
-		if msg.file.Path != "" {
-			m.diffFiles = append(m.diffFiles, msg.file)
-		}
-		return m, nil
-
-	case errMsg:
-		m.err = msg.err
-		return m, nil
-
-	case clearErrorMsg:
-		m.err = nil
-		return m, nil
-	}
+	case TickMsg:
+		// Periodically check for changes
+		return m, m.checkForChanges()
 
 	return m, nil
 }

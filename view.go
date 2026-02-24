@@ -76,11 +76,12 @@ func (m Model) renderHeader() string {
 }
 
 func (m Model) renderContent(height int) string {
-	// Split into two panels
-	panelWidth := m.width / 2
+	// Split into two panels - left panel gets 1/3, right panel gets 2/3
+	leftPanelWidth := m.width / 3
+	rightPanelWidth := m.width - leftPanelWidth
 
-	leftPanel := m.renderFileTree(panelWidth, height)
-	rightPanel := m.renderDiffPanel(m.width-panelWidth, height)
+	leftPanel := m.renderFileTree(leftPanelWidth, height)
+	rightPanel := m.renderDiffPanel(rightPanelWidth, height)
 
 	// Join panels horizontally
 	return lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, rightPanel)

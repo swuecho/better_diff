@@ -1,6 +1,8 @@
 package main
 
 import (
+	"time"
+
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -28,6 +30,7 @@ type Model struct {
 	branch        string
 	quitting      bool
 	err           error
+	lastFileHash  string // To detect changes in files
 }
 
 // TreeNode represents a node in the file tree
@@ -57,6 +60,9 @@ func (m Model) Init() tea.Cmd {
 		m.LoadGitInfo(),
 		m.LoadFiles(),
 		m.LoadAllDiffs(),
+		tea.Tick(time.Second*2, func(t time.Time) tea.Msg {
+			return TickMsg{time: t.Second()}
+		}),
 	)
 }
 
