@@ -8,10 +8,10 @@ import (
 
 // dirNode is used for building the file tree
 type dirNode struct {
-	path     string
-	name     string
-	files    []FileDiff
-	subdirs  map[string]*dirNode
+	path    string
+	name    string
+	files   []FileDiff
+	subdirs map[string]*dirNode
 }
 
 // Update implements tea.Model
@@ -166,7 +166,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case clearErrorMsg:
 		m.err = nil
 		return m, nil
-}
+	}
 
 	return m, nil
 }
@@ -414,13 +414,13 @@ func buildTreeNodes(dir *dirNode, depth int) []TreeNode {
 		childNodes := buildTreeNodes(subdir, depth+1)
 		totalAdded, totalRemoved := getDirStats(subdir)
 		nodes = append(nodes, TreeNode{
-			name:        subdir.name,
-			path:        subdir.path,
-			isDir:       true,
-			isExpanded:  false,
-			children:    childNodes,
-			changeType:  getDirChangeType(subdir),
-			linesAdded:  totalAdded,
+			name:         subdir.name,
+			path:         subdir.path,
+			isDir:        true,
+			isExpanded:   false,
+			children:     childNodes,
+			changeType:   getDirChangeType(subdir),
+			linesAdded:   totalAdded,
 			linesRemoved: totalRemoved,
 		})
 	}

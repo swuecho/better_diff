@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 
 	"github.com/go-git/go-git/v5"
@@ -23,11 +24,11 @@ const (
 
 // FileDiff represents a file with its changes
 type FileDiff struct {
-	Path       string
-	OldPath    string // for renames
-	ChangeType ChangeType
-	Hunks      []Hunk
-	LinesAdded int
+	Path         string
+	OldPath      string // for renames
+	ChangeType   ChangeType
+	Hunks        []Hunk
+	LinesAdded   int
 	LinesRemoved int
 }
 
@@ -72,6 +73,13 @@ const (
 	WholeFile
 )
 
+const (
+	// DefaultDiffContext is the default number of context lines in diff
+	DefaultDiffContext = 5
+	// WholeFileContext is a large number to show whole file in diff
+	WholeFileContext = 999999
+)
+
 // Repository holds the git repository instance
 var repository *git.Repository
 
@@ -86,7 +94,7 @@ func OpenRepository() error {
 		DetectDotGit: true,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to open git repository: %w", err)
+		return fmt.Errorf("failed to open git repository at %s: %w", repoPath, err)
 	}
 
 	repository = repo
@@ -119,7 +127,7 @@ func GetCurrentBranch() (string, error) {
 
 	ref, err := repository.Head()
 	if err != nil {
-		return "", fmt.Errorf("failed to get HEAD: %w", err)
+		return "", fmt.Errorf("failed to get HEAD reference: %w", err)
 	}
 
 	if ref.Name().IsBranch() {
@@ -145,7 +153,7 @@ func GetChangedFiles(mode DiffMode) ([]FileDiff, error) {
 
 	status, err := worktree.Status()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get status: %w", err)
+		return nil, fmt.Errorf("failed to get git status: %w", err)
 	}
 
 	// Collect paths and sort them for stable ordering
@@ -153,14 +161,7 @@ func GetChangedFiles(mode DiffMode) ([]FileDiff, error) {
 	for path := range status {
 		paths = append(paths, path)
 	}
-	// Sort paths to ensure consistent order
-	for i := 0; i < len(paths); i++ {
-		for j := i + 1; j < len(paths); j++ {
-			if paths[i] > paths[j] {
-				paths[i], paths[j] = paths[j], paths[i]
-			}
-		}
-	}
+	sort.Strings(paths)
 
 	var files []FileDiff
 	for _, path := range paths {
@@ -208,7 +209,8 @@ func GetChangedFiles(mode DiffMode) ([]FileDiff, error) {
 }
 
 // GetDiff gets the git diff based on mode
-// For complex diff operations, we use git CLI as fallback
+// Uses git CLI for diff generation as it provides better compatibility
+// with various edge cases than go-git's diff implementation
 func GetDiff(mode DiffMode, viewMode DiffViewMode) ([]FileDiff, error) {
 	if repository == nil {
 		if err := OpenRepository(); err != nil {
@@ -216,16 +218,14 @@ func GetDiff(mode DiffMode, viewMode DiffViewMode) ([]FileDiff, error) {
 		}
 	}
 
-	// Use the git CLI fallback for now as go-git's diff generation is limited
-	// This ensures compatibility while we fully migrate to go-git
 	return getDiffAlternative(mode, viewMode)
 }
 
 // getDiffAlternative uses git diff command output parsing
 func getDiffAlternative(mode DiffMode, viewMode DiffViewMode) ([]FileDiff, error) {
-	unified := "5"
+	unified := fmt.Sprintf("%d", DefaultDiffContext)
 	if viewMode == WholeFile {
-		unified = "999999"
+		unified = fmt.Sprintf("%d", WholeFileContext)
 	}
 
 	var args []string
@@ -237,7 +237,7 @@ func getDiffAlternative(mode DiffMode, viewMode DiffViewMode) ([]FileDiff, error
 
 	output, err := runGitCommand(args...)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get git diff: %w", err)
+		return nil, fmt.Errorf("failed to get git diff (mode=%v): %w", mode, err)
 	}
 
 	return parseDiff(output)
@@ -263,7 +263,7 @@ func runGitCommand(args ...string) (string, error) {
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("git command failed: %w, stderr: %s", err, stderr.String())
+		return "", fmt.Errorf("git command %v failed: %w, stderr: %s", args, err, stderr.String())
 	}
 
 	return out.String(), nil
