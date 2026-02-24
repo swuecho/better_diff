@@ -16,6 +16,8 @@ const (
 
 // Model holds the application state
 type Model struct {
+	git           *GitService // Git service (dependency injection)
+	logger        *Logger     // Logger for error tracking
 	files         []FileDiff
 	diffFiles     []FileDiff // Files with full diff content
 	fileTree      []TreeNode
@@ -30,6 +32,7 @@ type Model struct {
 	rootPath      string
 	branch        string
 	quitting      bool
+	showHelp      bool // Help modal visibility
 	err           error
 	lastFileHash  string // To detect changes in files
 }
@@ -47,9 +50,11 @@ type TreeNode struct {
 	linesRemoved int
 }
 
-// NewModel creates a new model
-func NewModel() Model {
+// NewModel creates a new model with GitService and Logger
+func NewModel(gitService *GitService, logger *Logger) Model {
 	return Model{
+		git:          gitService,
+		logger:       logger,
 		panel:        FileTreePanel,
 		diffMode:     Unstaged,
 		diffViewMode: DiffOnly,
@@ -73,12 +78,22 @@ func (m Model) Init() tea.Cmd {
 // LoadGitInfo loads git repository info
 func (m Model) LoadGitInfo() tea.Cmd {
 	return func() tea.Msg {
-		rootPath, err := GetRootPath()
+		if m.git == nil {
+			return errMsg{&ServiceError{Message: "Git service not initialized"}}
+		}
+
+		rootPath, err := m.git.GetRootPath()
 		if err != nil {
+			if m.logger != nil {
+				m.logger.Error("Failed to get root path", err, nil)
+			}
 			return errMsg{err}
 		}
-		branch, err := GetCurrentBranch()
+		branch, err := m.git.GetCurrentBranch()
 		if err != nil {
+			if m.logger != nil {
+				m.logger.Error("Failed to get current branch", err, nil)
+			}
 			return errMsg{err}
 		}
 		return gitInfoMsg{rootPath, branch}
@@ -88,8 +103,17 @@ func (m Model) LoadGitInfo() tea.Cmd {
 // LoadFiles loads changed files
 func (m Model) LoadFiles() tea.Cmd {
 	return func() tea.Msg {
-		files, err := GetChangedFiles(m.diffMode)
+		if m.git == nil {
+			return errMsg{&ServiceError{Message: "Git service not initialized"}}
+		}
+
+		files, err := m.git.GetChangedFiles(m.diffMode)
 		if err != nil {
+			if m.logger != nil {
+				m.logger.Error("Failed to get changed files", err, map[string]interface{}{
+					"mode": m.diffMode,
+				})
+			}
 			return errMsg{err}
 		}
 		return filesLoadedMsg{files}
@@ -99,8 +123,18 @@ func (m Model) LoadFiles() tea.Cmd {
 // LoadDiff loads the diff for a specific file
 func (m Model) LoadDiff(path string) tea.Cmd {
 	return func() tea.Msg {
-		files, err := GetDiff(m.diffMode, m.diffViewMode)
+		if m.git == nil {
+			return errMsg{&ServiceError{Message: "Git service not initialized"}}
+		}
+
+		files, err := m.git.GetDiff(m.diffMode, m.diffViewMode, m.logger)
 		if err != nil {
+			if m.logger != nil {
+				m.logger.Error("Failed to get diff", err, map[string]interface{}{
+					"file": path,
+					"mode": m.diffMode,
+				})
+			}
 			return errMsg{err}
 		}
 		// Find the file with matching path
@@ -116,12 +150,30 @@ func (m Model) LoadDiff(path string) tea.Cmd {
 // LoadAllDiffs loads diffs for all changed files at startup
 func (m Model) LoadAllDiffs() tea.Cmd {
 	return func() tea.Msg {
-		files, err := GetDiff(m.diffMode, m.diffViewMode)
+		if m.git == nil {
+			return errMsg{&ServiceError{Message: "Git service not initialized"}}
+		}
+
+		files, err := m.git.GetDiff(m.diffMode, m.diffViewMode, m.logger)
 		if err != nil {
+			if m.logger != nil {
+				m.logger.Error("Failed to get all diffs", err, map[string]interface{}{
+					"mode": m.diffMode,
+				})
+			}
 			return errMsg{err}
 		}
 		return allDiffsLoadedMsg{files}
 	}
+}
+
+// ServiceError represents an error from a service not being initialized
+type ServiceError struct {
+	Message string
+}
+
+func (e *ServiceError) Error() string {
+	return e.Message
 }
 
 // Messages

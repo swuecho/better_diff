@@ -6,6 +6,15 @@ import (
 	"testing"
 )
 
+// setupGitService creates a GitService for testing
+func setupGitService(t *testing.T) *GitService {
+	gitService, err := NewGitService()
+	if err != nil {
+		t.Skipf("Skipping test: not in a git repository or git service init failed: %v", err)
+	}
+	return gitService
+}
+
 func TestSplitLines(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -221,27 +230,24 @@ func TestComputeHunksNoEmptyLines(t *testing.T) {
 	}
 }
 
-// TestOpenRepository tests opening a git repository
-func TestOpenRepository(t *testing.T) {
-	// This test assumes it's run from the project directory which is a git repo
-	err := OpenRepository()
-	if err != nil {
-		t.Fatalf("OpenRepository() error = %v", err)
+// TestNewGitService tests creating a new GitService
+func TestNewGitService(t *testing.T) {
+	gitService := setupGitService(t)
+
+	if gitService == nil {
+		t.Fatal("NewGitService() returned nil")
 	}
 
-	if repository == nil {
-		t.Fatal("OpenRepository() did not set repository variable")
+	if gitService.GetRepository() == nil {
+		t.Error("GitService.Repository is nil")
 	}
 }
 
 // TestGetRootPath tests getting the repository root path
 func TestGetRootPath(t *testing.T) {
-	err := OpenRepository()
-	if err != nil {
-		t.Skip("Skipping test: not in a git repository")
-	}
+	gitService := setupGitService(t)
 
-	rootPath, err := GetRootPath()
+	rootPath, err := gitService.GetRootPath()
 	if err != nil {
 		t.Fatalf("GetRootPath() error = %v", err)
 	}
@@ -258,12 +264,9 @@ func TestGetRootPath(t *testing.T) {
 
 // TestGetCurrentBranch tests getting the current branch name
 func TestGetCurrentBranch(t *testing.T) {
-	err := OpenRepository()
-	if err != nil {
-		t.Skip("Skipping test: not in a git repository")
-	}
+	gitService := setupGitService(t)
 
-	branch, err := GetCurrentBranch()
+	branch, err := gitService.GetCurrentBranch()
 	if err != nil {
 		t.Fatalf("GetCurrentBranch() error = %v", err)
 	}
@@ -280,17 +283,14 @@ func TestGetCurrentBranch(t *testing.T) {
 
 // TestGetChangedFiles tests getting the list of changed files
 func TestGetChangedFiles(t *testing.T) {
-	err := OpenRepository()
-	if err != nil {
-		t.Skip("Skipping test: not in a git repository")
-	}
+	gitService := setupGitService(t)
 
 	// Test both modes
 	modes := []DiffMode{Unstaged, Staged}
 
 	for _, mode := range modes {
 		t.Run(mode.String(), func(t *testing.T) {
-			files, err := GetChangedFiles(mode)
+			files, err := gitService.GetChangedFiles(mode)
 			if err != nil {
 				t.Fatalf("GetChangedFiles(%v) error = %v", mode, err)
 			}
@@ -314,10 +314,8 @@ func TestGetChangedFiles(t *testing.T) {
 
 // TestGetDiff tests getting diffs for changed files
 func TestGetDiff(t *testing.T) {
-	err := OpenRepository()
-	if err != nil {
-		t.Skip("Skipping test: not in a git repository")
-	}
+	gitService := setupGitService(t)
+	logger := NewLogger(INFO) // Create a test logger
 
 	// Create a temporary test file
 	tmpFile := "test_temp_file.txt"
@@ -330,7 +328,7 @@ func TestGetDiff(t *testing.T) {
 	}
 
 	// Add file to git
-	wt, err := repository.Worktree()
+	wt, err := gitService.GetRepository().Worktree()
 	if err != nil {
 		t.Skip("Skipping test: cannot get worktree")
 	}
@@ -340,7 +338,7 @@ func TestGetDiff(t *testing.T) {
 	}
 
 	// Get staged diffs
-	diffs, err := GetDiff(Staged, DiffOnly)
+	diffs, err := gitService.GetDiff(Staged, DiffOnly, logger)
 	if err != nil {
 		t.Fatalf("GetDiff(Staged) error = %v", err)
 	}

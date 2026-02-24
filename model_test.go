@@ -6,8 +6,32 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+// setupModel creates a model with GitService and Logger for testing
+func setupModel(t *testing.T) Model {
+	gitService, err := NewGitService()
+	if err != nil {
+		t.Skipf("Skipping test: git service not available: %v", err)
+	}
+	logger := NewLogger(INFO)
+	return NewModel(gitService, logger)
+}
+
 func TestNewModel(t *testing.T) {
-	model := NewModel()
+	gitService, err := NewGitService()
+	if err != nil {
+		t.Skip("Skipping test: git service not available")
+	}
+	logger := NewLogger(INFO)
+
+	model := NewModel(gitService, logger)
+
+	if model.git != gitService {
+		t.Errorf("NewModel() git = %v, want %v", model.git, gitService)
+	}
+
+	if model.logger != logger {
+		t.Errorf("NewModel() logger = %v, want %v", model.logger, logger)
+	}
 
 	if model.panel != FileTreePanel {
 		t.Errorf("NewModel() panel = %v, want %v", model.panel, FileTreePanel)
@@ -31,7 +55,7 @@ func TestNewModel(t *testing.T) {
 }
 
 func TestModelInit(t *testing.T) {
-	model := NewModel()
+	model := setupModel(t)
 
 	// Init should return commands
 	cmd := model.Init()
@@ -41,7 +65,7 @@ func TestModelInit(t *testing.T) {
 }
 
 func TestModelUpdateQuit(t *testing.T) {
-	model := NewModel()
+	model := setupModel(t)
 
 	// Test 'q' key
 	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}}
@@ -57,7 +81,7 @@ func TestModelUpdateQuit(t *testing.T) {
 }
 
 func TestModelUpdateCtrlC(t *testing.T) {
-	model := NewModel()
+	model := setupModel(t)
 
 	// Test ctrl+c
 	msg := tea.KeyMsg{Type: tea.KeyCtrlC}
@@ -73,7 +97,7 @@ func TestModelUpdateCtrlC(t *testing.T) {
 }
 
 func TestModelUpdateNavigation(t *testing.T) {
-	model := NewModel()
+	model := setupModel(t)
 	// Add some files to test navigation
 	model.files = []FileDiff{
 		{Path: "file1.txt"},
@@ -100,7 +124,7 @@ func TestModelUpdateNavigation(t *testing.T) {
 }
 
 func TestModelUpdateToggleStaged(t *testing.T) {
-	model := NewModel()
+	model := setupModel(t)
 
 	// Test 's' key to toggle staging
 	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}}
@@ -120,7 +144,7 @@ func TestModelUpdateToggleStaged(t *testing.T) {
 }
 
 func TestModelUpdateToggleViewMode(t *testing.T) {
-	model := NewModel()
+	model := setupModel(t)
 
 	// Test 'f' key to toggle view mode
 	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}}
@@ -140,7 +164,7 @@ func TestModelUpdateToggleViewMode(t *testing.T) {
 }
 
 func TestModelUpdateTogglePanel(t *testing.T) {
-	model := NewModel()
+	model := setupModel(t)
 
 	// Test tab key
 	msg := tea.KeyMsg{Type: tea.KeyTab}
@@ -160,7 +184,7 @@ func TestModelUpdateTogglePanel(t *testing.T) {
 }
 
 func TestModelUpdateTabInWholeFileMode(t *testing.T) {
-	model := NewModel()
+	model := setupModel(t)
 	model.diffViewMode = WholeFile
 
 	// In whole file mode, tab should not switch panels
@@ -173,7 +197,7 @@ func TestModelUpdateTabInWholeFileMode(t *testing.T) {
 }
 
 func TestModelWindowSize(t *testing.T) {
-	model := NewModel()
+	model := setupModel(t)
 
 	msg := tea.WindowSizeMsg{
 		Width:  80,
@@ -192,7 +216,7 @@ func TestModelWindowSize(t *testing.T) {
 }
 
 func TestGetTotalStats(t *testing.T) {
-	model := NewModel()
+	model := setupModel(t)
 
 	model.diffFiles = []FileDiff{
 		{Path: "file1.txt", LinesAdded: 5, LinesRemoved: 2},
@@ -214,7 +238,7 @@ func TestGetTotalStats(t *testing.T) {
 }
 
 func TestGetTotalStatsEmpty(t *testing.T) {
-	model := NewModel()
+	model := setupModel(t)
 	model.diffFiles = []FileDiff{}
 
 	files, added, removed := model.GetTotalStats()
@@ -231,7 +255,7 @@ func TestGetTotalStatsEmpty(t *testing.T) {
 }
 
 func TestFilesLoadedMsg(t *testing.T) {
-	model := NewModel()
+	model := setupModel(t)
 
 	files := []FileDiff{
 		{Path: "file1.txt", ChangeType: Modified},
@@ -251,7 +275,7 @@ func TestFilesLoadedMsg(t *testing.T) {
 }
 
 func TestAllDiffsLoadedMsg(t *testing.T) {
-	model := NewModel()
+	model := setupModel(t)
 
 	files := []FileDiff{
 		{Path: "file1.txt", LinesAdded: 5},
@@ -268,7 +292,7 @@ func TestAllDiffsLoadedMsg(t *testing.T) {
 }
 
 func TestDiffLoadedMsg(t *testing.T) {
-	model := NewModel()
+	model := setupModel(t)
 	model.diffFiles = []FileDiff{}
 
 	file := FileDiff{Path: "file1.txt", LinesAdded: 5}
@@ -285,7 +309,7 @@ func TestDiffLoadedMsg(t *testing.T) {
 }
 
 func TestDiffLoadedMsgReplaceExisting(t *testing.T) {
-	model := NewModel()
+	model := setupModel(t)
 	model.diffFiles = []FileDiff{
 		{Path: "file1.txt", LinesAdded: 2},
 	}
@@ -304,7 +328,7 @@ func TestDiffLoadedMsgReplaceExisting(t *testing.T) {
 }
 
 func TestDiffLoadedMsgSkipEmpty(t *testing.T) {
-	model := NewModel()
+	model := setupModel(t)
 	initialLen := len(model.diffFiles)
 
 	file := FileDiff{} // Empty file
@@ -318,7 +342,7 @@ func TestDiffLoadedMsgSkipEmpty(t *testing.T) {
 }
 
 func TestGitInfoMsg(t *testing.T) {
-	model := NewModel()
+	model := setupModel(t)
 
 	msg := gitInfoMsg{
 		rootPath: "/test/path",
@@ -336,7 +360,7 @@ func TestGitInfoMsg(t *testing.T) {
 }
 
 func TestErrMsg(t *testing.T) {
-	model := NewModel()
+	model := setupModel(t)
 
 	testErr := &testError{msg: "test error"}
 	msg := errMsg{err: testErr}
@@ -352,7 +376,7 @@ func TestErrMsg(t *testing.T) {
 }
 
 func TestClearErrorMsg(t *testing.T) {
-	model := NewModel()
+	model := setupModel(t)
 	model.err = &testError{msg: "test error"}
 
 	msg := clearErrorMsg{}
@@ -365,7 +389,7 @@ func TestClearErrorMsg(t *testing.T) {
 }
 
 func TestBuildFileTree(t *testing.T) {
-	model := NewModel()
+	model := setupModel(t)
 
 	model.files = []FileDiff{
 		{Path: "src/main.go", ChangeType: Modified, LinesAdded: 5, LinesRemoved: 2},
@@ -394,7 +418,7 @@ func TestBuildFileTree(t *testing.T) {
 }
 
 func TestFlattenTree(t *testing.T) {
-	model := NewModel()
+	model := setupModel(t)
 
 	model.files = []FileDiff{
 		{Path: "src/main.go", ChangeType: Modified},
@@ -422,7 +446,7 @@ func TestFlattenTree(t *testing.T) {
 }
 
 func TestToggleDirectory(t *testing.T) {
-	model := NewModel()
+	model := setupModel(t)
 
 	model.files = []FileDiff{
 		{Path: "src/main.go", ChangeType: Modified},
@@ -494,7 +518,7 @@ func (e *testError) Error() string {
 
 // TestTickMsg tests the tick message processing
 func TestTickMsg(t *testing.T) {
-	model := NewModel()
+	model := setupModel(t)
 	model.lastFileHash = "test"
 
 	msg := TickMsg{time: 0}

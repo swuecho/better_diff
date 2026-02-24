@@ -13,6 +13,11 @@ func (m Model) View() string {
 		return ""
 	}
 
+	// If help is shown, render help modal overlay
+	if m.showHelp {
+		return m.renderHelpModal()
+	}
+
 	// Calculate dimensions
 	headerHeight := 2
 	footerHeight := 1
@@ -35,24 +40,16 @@ func (m Model) View() string {
 }
 
 func (m Model) renderHeader() string {
-	// Styles
-	headerStyle := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color("blue"))
-
-	pathStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("243")) // gray
-
 	// Build header
 	var parts []string
 
 	if m.branch != "" {
 		parts = append(parts, headerStyle.Render("better_diff"))
-		parts = append(parts, pathStyle.Render(m.branch))
+		parts = append(parts, subtleStyle.Render(m.branch))
 	}
 
 	if m.rootPath != "" {
-		parts = append(parts, pathStyle.Render(m.rootPath))
+		parts = append(parts, subtleStyle.Render(m.rootPath))
 	}
 
 	modeText := "Unstaged"
@@ -60,7 +57,7 @@ func (m Model) renderHeader() string {
 		modeText = "Staged"
 	}
 	modeStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("yellow")).
+		Foreground(colorYellow).
 		Bold(true)
 	parts = append(parts, modeStyle.Render("["+modeText+"]"))
 
@@ -70,7 +67,7 @@ func (m Model) renderHeader() string {
 		viewModeText = "Whole File"
 	}
 	viewModeStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("86")).
+		Foreground(colorGreen86).
 		Bold(true)
 	parts = append(parts, viewModeStyle.Render("["+viewModeText+"]"))
 
@@ -87,9 +84,12 @@ func (m Model) renderHeader() string {
 		} else {
 			stats = fmt.Sprintf("%d files", files)
 		}
-		statsStyle := lipgloss.NewStyle().
-			Foreground(lipgloss.Color("244"))
-		parts = append(parts, statsStyle.Render("("+stats+")"))
+		parts = append(parts, statsSubtleStyle.Render("("+stats+")"))
+	}
+
+	// Add help hint
+	if !m.showHelp {
+		parts = append(parts, subtleStyle.Render("Press ? for help"))
 	}
 
 	// Join with spacing
@@ -97,7 +97,7 @@ func (m Model) renderHeader() string {
 
 	// Add separator
 	separator := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("237")).
+		Foreground(colorGray237).
 		Render(strings.Repeat("─", m.width))
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, separator)
@@ -121,26 +121,6 @@ func (m Model) renderContent(height int) string {
 }
 
 func (m Model) renderFileTree(width, height int) string {
-	// Styles
-	dirStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("75")). // Soft blue
-		Bold(true)
-
-	fileStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("white"))
-
-	modifiedStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("229")) // Soft warm yellow
-
-	addedStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("142")) // Soft green matching diff panel
-
-	deletedStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("203")) // Soft red matching diff panel
-
-	statsStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("244")) // Subtle gray for stats
-
 	selectedStyle := lipgloss.NewStyle().
 		Background(lipgloss.Color("235")).
 		Width(width - 2)
@@ -436,4 +416,9 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// renderHelpModal renders the help modal overlay
+func (m Model) renderHelpModal() string {
+	return m.renderHelp()
 }

@@ -6,8 +6,18 @@ import (
 	"testing"
 )
 
+// setupModel creates a model with GitService and Logger for testing
+func setupModelForView(t *testing.T) Model {
+	gitService, err := NewGitService()
+	if err != nil {
+		t.Skipf("Skipping test: git service not available: %v", err)
+	}
+	logger := NewLogger(WARN) // Use WARN to reduce noise in view tests
+	return NewModel(gitService, logger)
+}
+
 func TestView(t *testing.T) {
-	model := NewModel()
+	model := setupModelForView(t)
 	model.width = 80
 	model.height = 24
 	model.branch = "main"
@@ -26,7 +36,7 @@ func TestView(t *testing.T) {
 }
 
 func TestViewWithFiles(t *testing.T) {
-	model := NewModel()
+	model := setupModelForView(t)
 	model.width = 80
 	model.height = 24
 	model.branch = "main"
@@ -54,7 +64,7 @@ func TestViewWithFiles(t *testing.T) {
 }
 
 func TestViewWithDiff(t *testing.T) {
-	model := NewModel()
+	model := setupModelForView(t)
 	model.width = 80
 	model.height = 24
 	model.branch = "main"
@@ -97,7 +107,7 @@ func TestViewWithDiff(t *testing.T) {
 }
 
 func TestViewWithError(t *testing.T) {
-	model := NewModel()
+	model := setupModelForView(t)
 	model.width = 80
 	model.height = 24
 	model.branch = "main"
@@ -114,7 +124,7 @@ func TestViewWithError(t *testing.T) {
 }
 
 func TestViewWithQuitting(t *testing.T) {
-	model := NewModel()
+	model := setupModelForView(t)
 	model.width = 80
 	model.height = 24
 	model.quitting = true
@@ -143,7 +153,7 @@ func TestGetChangeTypeSymbol(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// We'll test this indirectly through View
-			model := NewModel()
+			model := setupModelForView(t)
 			model.width = 80
 			model.height = 24
 
@@ -175,7 +185,7 @@ func TestViewDimensions(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			model := NewModel()
+			model := setupModelForView(t)
 			model.width = tt.width
 			model.height = tt.height
 			model.branch = "main"
@@ -193,7 +203,7 @@ func TestViewDimensions(t *testing.T) {
 }
 
 func TestViewFileTree(t *testing.T) {
-	model := NewModel()
+	model := setupModelForView(t)
 	model.width = 80
 	model.height = 24
 	model.branch = "main"
@@ -224,7 +234,7 @@ func TestViewFileTree(t *testing.T) {
 }
 
 func TestViewExpandedDirectory(t *testing.T) {
-	model := NewModel()
+	model := setupModelForView(t)
 	model.width = 80
 	model.height = 24
 	model.branch = "main"
@@ -258,7 +268,7 @@ func TestViewExpandedDirectory(t *testing.T) {
 }
 
 func TestViewLineStats(t *testing.T) {
-	model := NewModel()
+	model := setupModelForView(t)
 	model.width = 80
 	model.height = 24
 	model.branch = "main"
@@ -279,7 +289,7 @@ func TestViewLineStats(t *testing.T) {
 }
 
 func TestViewDiffPanel(t *testing.T) {
-	model := NewModel()
+	model := setupModelForView(t)
 	model.width = 80
 	model.height = 24
 	model.branch = "main"
@@ -320,7 +330,7 @@ func TestViewDiffPanel(t *testing.T) {
 }
 
 func TestViewWithScrolling(t *testing.T) {
-	model := NewModel()
+	model := setupModelForView(t)
 	model.width = 80
 	model.height = 10 // Small height to force scrolling
 	model.branch = "main"
@@ -347,7 +357,7 @@ func TestViewWithScrolling(t *testing.T) {
 }
 
 func TestViewDiffScrolling(t *testing.T) {
-	model := NewModel()
+	model := setupModelForView(t)
 	model.width = 80
 	model.height = 10
 	model.panel = DiffPanel
@@ -395,7 +405,7 @@ func TestViewDiffScrolling(t *testing.T) {
 }
 
 func TestViewColorCodes(t *testing.T) {
-	model := NewModel()
+	model := setupModelForView(t)
 	model.width = 80
 	model.height = 24
 	model.branch = "main"
@@ -439,7 +449,7 @@ func stripAnsi(s string) string {
 
 // TestViewWithWholeFileMode tests the whole file view mode
 func TestViewWithWholeFileMode(t *testing.T) {
-	model := NewModel()
+	model := setupModelForView(t)
 	model.width = 80
 	model.height = 24
 	model.branch = "main"
@@ -476,7 +486,7 @@ func TestViewWithWholeFileMode(t *testing.T) {
 
 // TestViewEmptyRepository tests view when there are no changes
 func TestViewEmptyRepository(t *testing.T) {
-	model := NewModel()
+	model := setupModelForView(t)
 	model.width = 80
 	model.height = 24
 	model.branch = "main"
@@ -494,7 +504,7 @@ func TestViewEmptyRepository(t *testing.T) {
 
 func TestGetChangeTypeColor(t *testing.T) {
 	// This tests the color selection indirectly through View
-	model := NewModel()
+	model := setupModelForView(t)
 	model.width = 80
 	model.height = 24
 	model.branch = "main"
@@ -516,7 +526,7 @@ func TestGetChangeTypeColor(t *testing.T) {
 }
 
 func TestViewPanelSwitch(t *testing.T) {
-	model := NewModel()
+	model := setupModelForView(t)
 	model.width = 80
 	model.height = 24
 	model.branch = "main"
@@ -555,7 +565,7 @@ func TestViewPanelSwitch(t *testing.T) {
 
 // TestViewWithLongPaths tests view with long file paths
 func TestViewWithLongPaths(t *testing.T) {
-	model := NewModel()
+	model := setupModelForView(t)
 	model.width = 80
 	model.height = 24
 	model.branch = "main"
@@ -576,7 +586,7 @@ func TestViewWithLongPaths(t *testing.T) {
 
 // TestViewWithSpecialCharacters tests view with special characters in file names
 func TestViewWithSpecialCharacters(t *testing.T) {
-	model := NewModel()
+	model := setupModelForView(t)
 	model.width = 80
 	model.height = 24
 	model.branch = "main"

@@ -99,6 +99,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.diffScroll = 0
 			m.diffFiles = nil
 			return m, m.LoadAllDiffs()
+
+		case "?":
+			// Toggle help screen
+			if m.showHelp {
+				m.showHelp = false
+			} else {
+				m.showHelp = true
+			}
+			return m, nil
 		}
 
 	case tea.WindowSizeMsg:
@@ -157,6 +166,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.diffFiles = append(m.diffFiles, msg.file)
 			}
 		}
+		return m, nil
+
+	case ShowHelpMsg:
+		m.showHelp = true
+		return m, nil
+
+	case HideHelpMsg:
+		m.showHelp = false
 		return m, nil
 
 	case errMsg:
@@ -525,9 +542,18 @@ func getFileName(path string) string {
 // checkForChanges checks if the git repo has changed and reloads if necessary
 func (m Model) checkForChanges() tea.Cmd {
 	return func() tea.Msg {
+		if m.git == nil {
+			return TickMsg{time: 0}
+		}
+
 		// Get current files and compute a hash
-		files, err := GetChangedFiles(m.diffMode)
+		files, err := m.git.GetChangedFiles(m.diffMode)
 		if err != nil {
+			if m.logger != nil {
+				m.logger.Error("Failed to check for changes", err, map[string]interface{}{
+					"mode": m.diffMode,
+				})
+			}
 			return errMsg{err}
 		}
 
@@ -536,6 +562,13 @@ func (m Model) checkForChanges() tea.Cmd {
 
 		if currentHash != m.lastFileHash {
 			// Files have changed, reload everything
+			if m.logger != nil {
+				m.logger.Info("Repository changes detected", map[string]interface{}{
+					"previous_hash": m.lastFileHash,
+					"new_hash":      currentHash,
+					"file_count":    len(files),
+				})
+			}
 			return filesChangedMsg{
 				files: files,
 				hash:  currentHash,
