@@ -11,6 +11,7 @@ import (
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/format/index"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/sergi/go-diff/diffmatchpatch"
 )
 
 // ChangeType represents the type of change
@@ -79,6 +80,8 @@ const (
 	DefaultDiffContext = 5
 	// WholeFileContext is a large number to show whole file in diff
 	WholeFileContext = 999999
+	// MaxFileSize is the maximum file size we'll diff (10MB)
+	MaxFileSize = 10 * 1024 * 1024
 )
 
 // Repository holds the git repository instance
@@ -171,21 +174,26 @@ func GetChangedFiles(mode DiffMode) ([]FileDiff, error) {
 	var files []FileDiff
 	for _, path := range paths {
 		fileStatus := status[path]
+
+		// Skip files that don't have changes in the mode we're interested in
+		var relevantChange bool
+		if mode == Staged {
+			relevantChange = fileStatus.Staging != git.Unmodified
+		} else {
+			relevantChange = fileStatus.Worktree != git.Unmodified
+		}
+
+		if !relevantChange {
+			continue
+		}
+
 		var changeType ChangeType
 		var statusCode string
 
 		if mode == Staged {
 			statusCode = string(fileStatus.Staging)
-			// Skip unstaged-only changes
-			if fileStatus.Staging == git.Unmodified {
-				continue
-			}
 		} else {
 			statusCode = string(fileStatus.Worktree)
-			// Skip staged-only changes
-			if fileStatus.Worktree == git.Unmodified {
-				continue
-			}
 		}
 
 		switch statusCode {
@@ -320,8 +328,14 @@ func getFileDiff(worktree *git.Worktree, idx *index.Index, headCommit *object.Co
 		if err == nil {
 			oldReader, err := oldFile.Reader()
 			if err == nil {
-				oldContent, _ = readAll(oldReader)
+				oldContent, err = readAll(oldReader)
 				oldReader.Close()
+				if err != nil {
+					return nil, fmt.Errorf("failed to read old file %s: %w", path, err)
+				}
+				if len(oldContent) > MaxFileSize {
+					return nil, fmt.Errorf("file %s too large to diff (%d > %d)", path, len(oldContent), MaxFileSize)
+				}
 			}
 		}
 
@@ -332,8 +346,14 @@ func getFileDiff(worktree *git.Worktree, idx *index.Index, headCommit *object.Co
 				if err == nil {
 					newReader, err := newBlob.Reader()
 					if err == nil {
-						newContent, _ = readAll(newReader)
+						newContent, err = readAll(newReader)
 						newReader.Close()
+						if err != nil {
+							return nil, fmt.Errorf("failed to read new file %s from index: %w", path, err)
+						}
+						if len(newContent) > MaxFileSize {
+							return nil, fmt.Errorf("file %s too large to diff (%d > %d)", path, len(newContent), MaxFileSize)
+						}
 					}
 				}
 				break
@@ -348,8 +368,14 @@ func getFileDiff(worktree *git.Worktree, idx *index.Index, headCommit *object.Co
 				if err == nil {
 					oldReader, err := oldBlob.Reader()
 					if err == nil {
-						oldContent, _ = readAll(oldReader)
+						oldContent, err = readAll(oldReader)
 						oldReader.Close()
+						if err != nil {
+							return nil, fmt.Errorf("failed to read old file %s from index: %w", path, err)
+						}
+						if len(oldContent) > MaxFileSize {
+							return nil, fmt.Errorf("file %s too large to diff (%d > %d)", path, len(oldContent), MaxFileSize)
+						}
 					}
 				}
 				break
@@ -359,8 +385,14 @@ func getFileDiff(worktree *git.Worktree, idx *index.Index, headCommit *object.Co
 		// Get new content from worktree
 		worktreeFile, err := worktree.Filesystem.Open(path)
 		if err == nil {
-			newContent, _ = readAll(worktreeFile)
+			newContent, err = readAll(worktreeFile)
 			worktreeFile.Close()
+			if err != nil {
+				return nil, fmt.Errorf("failed to read new file %s from worktree: %w", path, err)
+			}
+			if len(newContent) > MaxFileSize {
+				return nil, fmt.Errorf("file %s too large to diff (%d > %d)", path, len(newContent), MaxFileSize)
+			}
 		}
 		// If file doesn't exist, newContent remains nil (deleted)
 	}
@@ -375,10 +407,15 @@ func getFileDiff(worktree *git.Worktree, idx *index.Index, headCommit *object.Co
 	}
 
 	// Generate hunks from diff
-	oldLines := strings.Split(string(oldContent), "\n")
-	newLines := strings.Split(string(newContent), "\n")
+	// Normalize: if content is empty, use empty array
+	// Otherwise split by newline and remove trailing empty string from split
+	oldLines := splitLines(string(oldContent))
+	newLines := splitLines(string(newContent))
 
-	hunks := computeHunks(oldLines, newLines)
+	hunks, err := computeHunks(oldLines, newLines)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compute diff for %s: %w", path, err)
+	}
 	fileDiff.Hunks = hunks
 
 	// Count lines
@@ -395,70 +432,183 @@ func getFileDiff(worktree *git.Worktree, idx *index.Index, headCommit *object.Co
 	return fileDiff, nil
 }
 
-// computeHunks computes diff hunks using a simple line-by-line comparison
-func computeHunks(oldLines, newLines []string) []Hunk {
+// computeHunks computes diff hunks using Myers diff algorithm
+func computeHunks(oldLines, newLines []string) ([]Hunk, error) {
+	dmp := diffmatchpatch.New()
+
+	// Join lines with newline to create the full text
+	oldText := strings.Join(oldLines, "\n")
+	newText := strings.Join(newLines, "\n")
+
+	// Convert to line-based character encoding
+	// This encodes each unique line as a single character for efficient diffing
+	oldChars, newChars, lineArray := dmp.DiffLinesToChars(oldText, newText)
+
+	// Compute the diff on the character-encoded text
+	charDiffs := dmp.DiffMain(oldChars, newChars, false)
+
+	// Convert character diffs to line diffs manually
+	// We need to split the character-encoded text by characters and map each to a line
+	// Then merge adjacent diffs of the same type
+	type lineDiff struct {
+		Type  diffmatchpatch.Operation
+		Lines []string
+	}
+
+	var lineDiffs []lineDiff
+
+	for _, charDiff := range charDiffs {
+		// Each character in charDiff.Text represents one line
+		runes := []rune(charDiff.Text)
+		var lines []string
+		for _, r := range runes {
+			// Convert rune to int for array indexing
+			idx := int(r)
+			if idx < len(lineArray) {
+				// Get the line and strip trailing newline if present
+				line := lineArray[idx]
+				line = strings.TrimSuffix(line, "\n")
+				lines = append(lines, line)
+			}
+		}
+
+		// Merge with previous diff if same type
+		if len(lineDiffs) > 0 && lineDiffs[len(lineDiffs)-1].Type == charDiff.Type {
+			lineDiffs[len(lineDiffs)-1].Lines = append(lineDiffs[len(lineDiffs)-1].Lines, lines...)
+		} else {
+			lineDiffs = append(lineDiffs, lineDiff{
+				Type:  charDiff.Type,
+				Lines: lines,
+			})
+		}
+	}
+
+	// Convert line diffs to hunks
 	var hunks []Hunk
 	var currentHunk *Hunk
 
-	oldLen := len(oldLines)
-	newLen := len(newLines)
-	maxLen := oldLen
-	if newLen > maxLen {
-		maxLen = newLen
-	}
+	oldLineNum := 1
+	newLineNum := 1
 
-	// Simple line-by-line diff (not optimal but works for basic cases)
-	for i := 0; i < maxLen; i++ {
-		oldLine := ""
-		newLine := ""
-
-		if i < oldLen {
-			oldLine = oldLines[i]
-		}
-		if i < newLen {
-			newLine = newLines[i]
+	for _, diff := range lineDiffs {
+		if len(diff.Lines) == 0 {
+			continue
 		}
 
-		if oldLine == newLine {
-			// Context line
-			if currentHunk != nil && len(currentHunk.Lines) > 0 {
-				// Add context to existing hunk
-				currentHunk.Lines = append(currentHunk.Lines, DiffLine{
-					Type:    LineContext,
-					Content: oldLine,
-				})
+		switch diff.Type {
+		case diffmatchpatch.DiffEqual:
+			if currentHunk != nil {
+				// Add context lines
+				for _, line := range diff.Lines {
+					currentHunk.Lines = append(currentHunk.Lines, DiffLine{
+						Type:    LineContext,
+						Content: line,
+					})
+					oldLineNum++
+					newLineNum++
+				}
+
+				// Check if we should close the hunk
+				trailingContext := 0
+				for i := len(currentHunk.Lines) - 1; i >= 0; i-- {
+					if currentHunk.Lines[i].Type == LineContext {
+						trailingContext++
+					} else {
+						break
+					}
+				}
+
+				// Only close if we have actual changes and enough context
+				if trailingContext >= DefaultDiffContext {
+					hasChanges := false
+					for _, l := range currentHunk.Lines {
+						if l.Type != LineContext {
+							hasChanges = true
+							break
+						}
+					}
+
+					if hasChanges {
+						currentHunk.OldCount = oldLineNum - currentHunk.OldStart - trailingContext
+						currentHunk.NewCount = newLineNum - currentHunk.NewStart - trailingContext
+
+						// Trim to keep only DefaultDiffContext lines of trailing context
+						if trailingContext > DefaultDiffContext {
+							trimCount := trailingContext - DefaultDiffContext
+							currentHunk.Lines = currentHunk.Lines[:len(currentHunk.Lines)-trimCount]
+						}
+
+						hunks = append(hunks, *currentHunk)
+						currentHunk = nil
+					}
+				}
+			} else {
+				oldLineNum += len(diff.Lines)
+				newLineNum += len(diff.Lines)
 			}
-		} else {
-			// Difference detected
+
+		case diffmatchpatch.DiffDelete:
 			if currentHunk == nil {
 				currentHunk = &Hunk{
-					Lines: []DiffLine{},
+					Lines:    []DiffLine{},
+					OldStart: oldLineNum,
+					NewStart: newLineNum,
 				}
 			}
 
-			// Add old line if exists (deletion)
-			if i < oldLen {
+			for _, line := range diff.Lines {
 				currentHunk.Lines = append(currentHunk.Lines, DiffLine{
 					Type:    LineRemoved,
-					Content: oldLine,
+					Content: line,
 				})
+				oldLineNum++
 			}
 
-			// Add new line if exists (addition)
-			if i < newLen {
+		case diffmatchpatch.DiffInsert:
+			if currentHunk == nil {
+				currentHunk = &Hunk{
+					Lines:    []DiffLine{},
+					OldStart: oldLineNum,
+					NewStart: newLineNum,
+				}
+			}
+
+			for _, line := range diff.Lines {
 				currentHunk.Lines = append(currentHunk.Lines, DiffLine{
 					Type:    LineAdded,
-					Content: newLine,
+					Content: line,
 				})
+				newLineNum++
 			}
 		}
 	}
 
+	// Close the last hunk
 	if currentHunk != nil {
+		currentHunk.OldCount = oldLineNum - currentHunk.OldStart
+		currentHunk.NewCount = newLineNum - currentHunk.NewStart
+
+		// Trim trailing context
+		trailingContext := 0
+		for i := len(currentHunk.Lines) - 1; i >= 0; i-- {
+			if currentHunk.Lines[i].Type == LineContext {
+				trailingContext++
+			} else {
+				break
+			}
+		}
+
+		if trailingContext > DefaultDiffContext {
+			trimCount := trailingContext - DefaultDiffContext
+			currentHunk.Lines = currentHunk.Lines[:len(currentHunk.Lines)-trimCount]
+			currentHunk.OldCount -= trimCount
+			currentHunk.NewCount -= trimCount
+		}
+
 		hunks = append(hunks, *currentHunk)
 	}
 
-	return hunks
+	return hunks, nil
 }
 
 // readAll reads all content from an io.Reader
@@ -469,4 +619,22 @@ func readAll(r io.Reader) ([]byte, error) {
 		return nil, err
 	}
 	return b.Bytes(), nil
+}
+
+// splitLines splits content by newline and normalizes the result
+// It removes the trailing empty string that results from splitting text with a trailing newline
+// For example: "a\nb\n" -> ["a", "b"] instead of ["a", "b", ""]
+func splitLines(content string) []string {
+	if content == "" {
+		return []string{}
+	}
+
+	lines := strings.Split(content, "\n")
+
+	// Remove trailing empty string if present (from trailing newline)
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+
+	return lines
 }
