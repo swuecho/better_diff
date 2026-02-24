@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -107,10 +108,16 @@ func (m Model) renderFileTree(width, height int) string {
 		Background(lipgloss.Color("235")).
 		Width(width - 2)
 
+	// Calculate internal content height
+	contentHeight := height - 2
+	if contentHeight < 0 {
+		contentHeight = 0
+	}
+
 	// Get visible nodes
 	flatTree := m.flattenTree()
 	start := m.scrollOffset
-	end := min(start+height, len(flatTree))
+	end := min(start+contentHeight, len(flatTree))
 	if start > len(flatTree) {
 		start = len(flatTree)
 	}
@@ -155,17 +162,17 @@ func (m Model) renderFileTree(width, height int) string {
 		var indicator string
 		switch node.changeType {
 		case Modified:
-			indicator = "●" // yellow dot
+			indicator = "●"
 			if !node.isDir {
 				style = modifiedStyle
 			}
 		case Added:
-			indicator = "+" // green plus
+			indicator = "+"
 			if !node.isDir {
 				style = addedStyle
 			}
 		case Deleted:
-			indicator = "-" // red minus
+			indicator = "-"
 			if !node.isDir {
 				style = deletedStyle
 			}
@@ -184,36 +191,49 @@ func (m Model) renderFileTree(width, height int) string {
 		lines = append(lines, line)
 	}
 
-	// Pad to height
-	for len(lines) < height {
-		lines = append(lines, "")
-	}
+	// Build content as a single string
+	content := strings.Join(lines, "\n")
 
-	// Create panel border
+	// Apply panel styling with border
 	panelStyle := lipgloss.NewStyle().
 		Width(width).
 		Height(height).
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("237"))
+		BorderForeground(lipgloss.Color("237")).
+		MaxWidth(width).
+		MaxHeight(height)
 
 	if m.panel == FileTreePanel {
 		panelStyle = panelStyle.BorderForeground(lipgloss.Color("blue"))
 	}
 
-	content := strings.Join(lines, "\n")
 	return panelStyle.Render(content)
 }
 
 func (m Model) renderDiffPanel(width, height int) string {
-	// Styles
+	// Enhanced styles with better colors
 	addedStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("green"))
+		Foreground(lipgloss.Color("86")). // Brighter green
+		Bold(true)
+
+	addedPrefixStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("46")). // Even brighter green for +
+		Bold(true)
 
 	removedStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("red"))
+		Foreground(lipgloss.Color("196")). // Brighter red
+		Bold(true)
+
+	removedPrefixStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("160")). // Bright red for -
+		Bold(true)
 
 	contextStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("243"))
+		Foreground(lipgloss.Color("241")) // Lighter gray for context
+
+	hunkStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("240")). // Dim gray for hunk separator
+		Bold(true)
 
 	// Get selected file
 	var selectedFile *FileDiff
@@ -230,58 +250,95 @@ func (m Model) renderDiffPanel(width, height int) string {
 		}
 	}
 
-	// Render diff
-	var lines []string
+	// Render all diff lines first
+	var allLines []string
 	if selectedFile != nil {
-		for _, hunk := range selectedFile.Hunks {
-			// Add hunk header
-			lines = append(lines, contextStyle.Render("..."))
+		if len(selectedFile.Hunks) == 0 {
+			// File has no hunks (binary file or no changes)
+			allLines = append(allLines, lipgloss.NewStyle().
+				Foreground(lipgloss.Color("243")).
+				Italic(true).
+				Render("No diff content available (binary file or no changes)"))
+		} else {
+			for _, hunk := range selectedFile.Hunks {
+				// Add hunk header
+				allLines = append(allLines, hunkStyle.Render("─"))
 
-			for _, diffLine := range hunk.Lines {
-				var prefix string
-				var style lipgloss.Style
+				for _, diffLine := range hunk.Lines {
+					var prefix string
+					var prefixStyle lipgloss.Style
+					var contentStyle lipgloss.Style
 
-				switch diffLine.Type {
-				case LineAdded:
-					prefix = "+"
-					style = addedStyle
-				case LineRemoved:
-					prefix = "-"
-					style = removedStyle
-				default:
-					prefix = " "
-					style = contextStyle
+					switch diffLine.Type {
+					case LineAdded:
+						prefix = "+"
+						prefixStyle = addedPrefixStyle
+						contentStyle = addedStyle
+					case LineRemoved:
+						prefix = "-"
+						prefixStyle = removedPrefixStyle
+						contentStyle = removedStyle
+					default:
+						prefix = " "
+						prefixStyle = contextStyle
+						contentStyle = contextStyle
+					}
+
+					// Render prefix and content separately for better styling
+					line := prefixStyle.Render(prefix) + " " + contentStyle.Render(diffLine.Content)
+					allLines = append(allLines, line)
 				}
-
-				line := prefix + " " + diffLine.Content
-				lines = append(lines, style.Render(line))
 			}
 		}
 	} else {
 		// No file selected
-		lines = append(lines, lipgloss.NewStyle().
+		allLines = append(allLines, lipgloss.NewStyle().
 			Foreground(lipgloss.Color("243")).
 			Italic(true).
 			Render("Select a file to view diff"))
 	}
 
-	// Pad to height
-	for len(lines) < height {
+	// Apply scrolling
+	contentHeight := height - 2 // Account for borders
+	if contentHeight < 0 {
+		contentHeight = 0
+	}
+
+	start := m.diffScroll
+	if start < 0 {
+		start = 0
+	}
+	if start > len(allLines) {
+		start = len(allLines)
+	}
+	end := min(start+contentHeight, len(allLines))
+
+	var lines []string
+	if start < len(allLines) && end > start {
+		lines = allLines[start:end]
+	}
+
+	// Pad to exact content height
+	for len(lines) < contentHeight {
 		lines = append(lines, "")
 	}
 
-	// Create panel
+	// Build content as a single string
+	content := strings.Join(lines, "\n")
+
+	// Apply panel styling with border
 	panelStyle := lipgloss.NewStyle().
 		Width(width).
 		Height(height).
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("237"))
+		BorderForeground(lipgloss.Color("237")).
+		MaxWidth(width).
+		MaxHeight(height)
 
 	if m.panel == DiffPanel {
 		panelStyle = panelStyle.BorderForeground(lipgloss.Color("blue"))
 	}
 
-	content := strings.Join(lines, "\n")
 	return panelStyle.Render(content)
 }
 
@@ -294,6 +351,9 @@ func (m Model) renderFooter() string {
 		Foreground(lipgloss.Color("blue")).
 		Bold(true)
 
+	scrollStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("yellow"))
+
 	// Build help text
 	help := []string{
 		keyStyle.Render("[↑↓]") + " Navigate",
@@ -301,6 +361,15 @@ func (m Model) renderFooter() string {
 		keyStyle.Render("[Tab]") + " Switch Panel",
 		keyStyle.Render("[s]") + " Staged/Unstaged",
 		keyStyle.Render("[q]") + " Quit",
+	}
+
+	// Add scroll indicator for diff panel
+	if m.panel == DiffPanel {
+		totalLines := m.getDiffLineCount()
+		if totalLines > 0 {
+			scrollPercent := (m.diffScroll * 100) / totalLines
+			help = append(help, scrollStyle.Render(fmt.Sprintf("Scroll: %d%%", scrollPercent)))
+		}
 	}
 
 	return footerStyle.Render(strings.Join(help, " • "))

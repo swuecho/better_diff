@@ -109,16 +109,22 @@ func parseDiff(diff string) ([]FileDiff, error) {
 		// Check for new file
 		if strings.HasPrefix(line, "diff --git") {
 			if currentFile != nil {
+				// Append the last hunk if there is one
+				if currentHunk != nil {
+					currentFile.Hunks = append(currentFile.Hunks, *currentHunk)
+					currentHunk = nil
+				}
 				files = append(files, *currentFile)
 			}
 			currentFile = &FileDiff{
 				Hunks: []Hunk{},
 			}
 
-			// Extract file path from "a/path b/path"
+			// Extract file path from "diff --git a/path b/path"
 			parts := strings.Fields(line)
-			if len(parts) >= 3 {
-				currentFile.Path = strings.TrimPrefix(parts[2], "b/")
+			if len(parts) >= 4 {
+				// Use parts[3] which is "b/path" and remove the "b/" prefix
+				currentFile.Path = strings.TrimPrefix(parts[3], "b/")
 			}
 		} else if strings.HasPrefix(line, "new file") {
 			if currentFile != nil {
@@ -140,11 +146,14 @@ func parseDiff(diff string) ([]FileDiff, error) {
 		} else if strings.HasPrefix(line, "@@") {
 			// Parse hunk header: @@ -old_start,old_count +new_start,new_count @@
 			if currentFile != nil {
+				// If there's a previous hunk, append it first
+				if currentHunk != nil {
+					currentFile.Hunks = append(currentFile.Hunks, *currentHunk)
+				}
 				currentHunk = &Hunk{
 					Lines: []DiffLine{},
 				}
 				fmt.Sscanf(line, "@@ -%d,%d +%d,%d @@", &currentHunk.OldStart, &currentHunk.OldCount, &currentHunk.NewStart, &currentHunk.NewCount)
-				currentFile.Hunks = append(currentFile.Hunks, *currentHunk)
 			}
 		} else if currentHunk != nil {
 			// Parse diff lines
@@ -168,6 +177,10 @@ func parseDiff(diff string) ([]FileDiff, error) {
 	}
 
 	if currentFile != nil {
+		// Append the last hunk if there is one
+		if currentHunk != nil {
+			currentFile.Hunks = append(currentFile.Hunks, *currentHunk)
+		}
 		files = append(files, *currentFile)
 	}
 

@@ -22,11 +22,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 
 		case "up", "k":
-			m.moveUp()
+			if m.panel == DiffPanel {
+				m.moveDiffUp()
+			} else {
+				m.moveUp()
+			}
 			return m, nil
 
 		case "down", "j":
-			m.moveDown()
+			if m.panel == DiffPanel {
+				m.moveDiffDown()
+			} else {
+				m.moveDown()
+			}
 			return m, nil
 
 		case "tab":
@@ -53,6 +61,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.selectedIndex = 0
 			m.scrollOffset = 0
+			m.diffScroll = 0
 			m.diffFiles = nil
 			return m, m.LoadFiles()
 		}
@@ -72,8 +81,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.buildFileTree()
 		return m, nil
 
+	case allDiffsLoadedMsg:
+		m.diffFiles = msg.files
+		return m, nil
+
 	case diffLoadedMsg:
-		m.diffFiles = append(m.diffFiles, msg.file)
+		// Only append if the file has actual content (not empty)
+		if msg.file.Path != "" {
+			m.diffFiles = append(m.diffFiles, msg.file)
+		}
 		return m, nil
 
 	case errMsg:
@@ -113,6 +129,48 @@ func (m *Model) moveDown() {
 	}
 }
 
+// moveDiffUp scrolls the diff view up
+func (m *Model) moveDiffUp() {
+	if m.diffScroll > 0 {
+		m.diffScroll--
+	}
+}
+
+// moveDiffDown scrolls the diff view down
+func (m *Model) moveDiffDown() {
+	// Get total diff line count
+	totalLines := m.getDiffLineCount()
+	visibleHeight := m.height - 3 // minus header and footer
+
+	if m.diffScroll < totalLines-visibleHeight {
+		m.diffScroll++
+	}
+}
+
+// getDiffLineCount returns the total number of lines in the current diff
+func (m *Model) getDiffLineCount() int {
+	flatTree := m.flattenTree()
+	if m.selectedIndex >= len(flatTree) {
+		return 0
+	}
+
+	node := flatTree[m.selectedIndex]
+	if node.isDir {
+		return 0
+	}
+
+	for i := range m.diffFiles {
+		if m.diffFiles[i].Path == node.path {
+			count := 0
+			for _, hunk := range m.diffFiles[i].Hunks {
+				count += 2 + len(hunk.Lines) // 2 for hunk header (...)
+			}
+			return count
+		}
+	}
+	return 0
+}
+
 // selectItem handles selection of current item
 func (m *Model) selectItem() tea.Cmd {
 	flatTree := m.flattenTree()
@@ -126,6 +184,8 @@ func (m *Model) selectItem() tea.Cmd {
 		m.toggleDirectory(node.path)
 		return nil
 	} else {
+		// Reset diff scroll when selecting a new file
+		m.diffScroll = 0
 		// Load diff for the file
 		return m.LoadDiff(node.path)
 	}

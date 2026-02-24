@@ -20,7 +20,8 @@ type Model struct {
 	selectedIndex int
 	panel         Panel
 	diffMode      DiffMode
-	scrollOffset  int
+	scrollOffset  int // For file tree scrolling
+	diffScroll    int // For diff panel scrolling
 	width         int
 	height        int
 	rootPath      string
@@ -46,6 +47,7 @@ func NewModel() Model {
 		panel:        FileTreePanel,
 		diffMode:     Unstaged,
 		scrollOffset: 0,
+		diffScroll:   0,
 	}
 }
 
@@ -54,6 +56,7 @@ func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		m.LoadGitInfo(),
 		m.LoadFiles(),
+		m.LoadAllDiffs(),
 	)
 }
 
@@ -100,6 +103,17 @@ func (m Model) LoadDiff(path string) tea.Cmd {
 	}
 }
 
+// LoadAllDiffs loads diffs for all changed files at startup
+func (m Model) LoadAllDiffs() tea.Cmd {
+	return func() tea.Msg {
+		files, err := GetDiff(m.diffMode)
+		if err != nil {
+			return errMsg{err}
+		}
+		return allDiffsLoadedMsg{files}
+	}
+}
+
 // Messages
 
 type gitInfoMsg struct {
@@ -113,6 +127,10 @@ type filesLoadedMsg struct {
 
 type diffLoadedMsg struct {
 	file FileDiff
+}
+
+type allDiffsLoadedMsg struct {
+	files []FileDiff
 }
 
 type errMsg struct {
