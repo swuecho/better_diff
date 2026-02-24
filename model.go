@@ -22,8 +22,9 @@ type Model struct {
 	selectedIndex int
 	panel         Panel
 	diffMode      DiffMode
-	scrollOffset  int // For file tree scrolling
-	diffScroll    int // For diff panel scrolling
+	diffViewMode  DiffViewMode // Diff view mode (diff-only or whole file)
+	scrollOffset  int          // For file tree scrolling
+	diffScroll    int          // For diff panel scrolling
 	width         int
 	height        int
 	rootPath      string
@@ -49,6 +50,7 @@ func NewModel() Model {
 	return Model{
 		panel:        FileTreePanel,
 		diffMode:     Unstaged,
+		diffViewMode: DiffOnly,
 		scrollOffset: 0,
 		diffScroll:   0,
 	}
@@ -95,7 +97,7 @@ func (m Model) LoadFiles() tea.Cmd {
 // LoadDiff loads the diff for a specific file
 func (m Model) LoadDiff(path string) tea.Cmd {
 	return func() tea.Msg {
-		files, err := GetDiff(m.diffMode)
+		files, err := GetDiff(m.diffMode, m.diffViewMode)
 		if err != nil {
 			return errMsg{err}
 		}
@@ -112,7 +114,7 @@ func (m Model) LoadDiff(path string) tea.Cmd {
 // LoadAllDiffs loads diffs for all changed files at startup
 func (m Model) LoadAllDiffs() tea.Cmd {
 	return func() tea.Msg {
-		files, err := GetDiff(m.diffMode)
+		files, err := GetDiff(m.diffMode, m.diffViewMode)
 		if err != nil {
 			return errMsg{err}
 		}

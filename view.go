@@ -64,6 +64,16 @@ func (m Model) renderHeader() string {
 		Bold(true)
 	parts = append(parts, modeStyle.Render("["+modeText+"]"))
 
+	// Add view mode indicator
+	viewModeText := "Diff Only"
+	if m.diffViewMode == WholeFile {
+		viewModeText = "Whole File"
+	}
+	viewModeStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("86")).
+		Bold(true)
+	parts = append(parts, viewModeStyle.Render("["+viewModeText+"]"))
+
 	// Join with spacing
 	header := strings.Join(parts, " ")
 
@@ -76,6 +86,11 @@ func (m Model) renderHeader() string {
 }
 
 func (m Model) renderContent(height int) string {
+	// In whole file mode, hide the file tree and show only diff
+	if m.diffViewMode == WholeFile {
+		return m.renderDiffPanel(m.width, height)
+	}
+
 	// Split into two panels - left panel gets 1/3, right panel gets 2/3
 	leftPanelWidth := m.width / 3
 	rightPanelWidth := m.width - leftPanelWidth
@@ -90,20 +105,20 @@ func (m Model) renderContent(height int) string {
 func (m Model) renderFileTree(width, height int) string {
 	// Styles
 	dirStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("blue")).
+		Foreground(lipgloss.Color("75")). // Soft blue
 		Bold(true)
 
 	fileStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("white"))
 
 	modifiedStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("yellow"))
+		Foreground(lipgloss.Color("229")) // Soft warm yellow
 
 	addedStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("green"))
+		Foreground(lipgloss.Color("142")) // Soft green matching diff panel
 
 	deletedStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("red"))
+		Foreground(lipgloss.Color("203")) // Soft red matching diff panel
 
 	selectedStyle := lipgloss.NewStyle().
 		Background(lipgloss.Color("235")).
@@ -212,29 +227,33 @@ func (m Model) renderFileTree(width, height int) string {
 }
 
 func (m Model) renderDiffPanel(width, height int) string {
-	// Enhanced styles with better colors
+	// Enhanced styles with better, softer colors
+	// Added lines - pleasing soft green
 	addedStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("86")). // Brighter green
-		Bold(true)
+		Foreground(lipgloss.Color("142")). // Soft green for content
+		Bold(false)
 
 	addedPrefixStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("46")). // Even brighter green for +
+		Foreground(lipgloss.Color("86")). // Brighter green for + prefix
 		Bold(true)
 
+	// Removed lines - pleasing soft red
 	removedStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("196")). // Brighter red
-		Bold(true)
+		Foreground(lipgloss.Color("203")). // Soft red for content
+		Bold(false)
 
 	removedPrefixStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("160")). // Bright red for -
+		Foreground(lipgloss.Color("196")). // Brighter red for - prefix
 		Bold(true)
 
+	// Context lines - light gray for readability
 	contextStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("241")) // Lighter gray for context
+		Foreground(lipgloss.Color("245")) // Light gray, easy on eyes
 
+	// Hunk separator - subtle visual divider
 	hunkStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("240")). // Dim gray for hunk separator
-		Bold(true)
+		Foreground(lipgloss.Color("244")). // Subtle gray
+		Bold(false)
 
 	// Get selected file
 	var selectedFile *FileDiff
@@ -361,6 +380,7 @@ func (m Model) renderFooter() string {
 		keyStyle.Render("[Enter]") + " Select/Expand",
 		keyStyle.Render("[Tab]") + " Switch Panel",
 		keyStyle.Render("[s]") + " Staged/Unstaged",
+		keyStyle.Render("[f]") + " Diff/Whole File",
 		keyStyle.Render("[q]") + " Quit",
 	}
 

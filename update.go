@@ -40,6 +40,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "tab":
+			// Don't allow switching to file tree panel in whole file mode
+			if m.diffViewMode == WholeFile {
+				return m, nil
+			}
 			if m.panel == FileTreePanel {
 				m.panel = DiffPanel
 			} else {
@@ -66,6 +70,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.diffScroll = 0
 			m.diffFiles = nil
 			return m, m.LoadFiles()
+
+		case "f":
+			// Toggle between diff-only and whole file view
+			if m.diffViewMode == DiffOnly {
+				m.diffViewMode = WholeFile
+				m.panel = DiffPanel // Auto-switch to diff panel
+			} else {
+				m.diffViewMode = DiffOnly
+			}
+			m.diffScroll = 0
+			m.diffFiles = nil
+			return m, m.LoadAllDiffs()
 		}
 
 	case tea.WindowSizeMsg:

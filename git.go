@@ -59,13 +59,26 @@ const (
 	Staged
 )
 
+// DiffViewMode represents how much context to show in diff
+type DiffViewMode int
+
+const (
+	DiffOnly DiffViewMode = iota
+	WholeFile
+)
+
 // GetDiff gets the git diff based on mode
-func GetDiff(mode DiffMode) ([]FileDiff, error) {
+func GetDiff(mode DiffMode, viewMode DiffViewMode) ([]FileDiff, error) {
+	unified := "5"
+	if viewMode == WholeFile {
+		unified = "999999"
+	}
+
 	var cmd *exec.Cmd
 	if mode == Staged {
-		cmd = exec.Command("git", "diff", "--cached", "--unified=5")
+		cmd = exec.Command("git", "diff", "--cached", "--unified="+unified)
 	} else {
-		cmd = exec.Command("git", "diff", "--unified=5")
+		cmd = exec.Command("git", "diff", "--unified="+unified)
 	}
 
 	var out bytes.Buffer
