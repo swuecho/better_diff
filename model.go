@@ -145,6 +145,12 @@ type errMsg struct {
 
 type clearErrorMsg struct{}
 
+// filesChangedMsg indicates that files have changed and need reloading
+type filesChangedMsg struct {
+	files []FileDiff
+	hash  string
+}
+
 // TickMsg is for periodic updates
 type TickMsg struct {
 	time int

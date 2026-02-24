@@ -1,6 +1,8 @@
 package main
 
 import (
+	"time"
+
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -76,6 +78,51 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case TickMsg:
 		// Periodically check for changes
 		return m, m.checkForChanges()
+
+	case gitInfoMsg:
+		m.rootPath = msg.rootPath
+		m.branch = msg.branch
+		return m, nil
+
+	case filesLoadedMsg:
+		m.files = msg.files
+		m.lastFileHash = computeFileHash(msg.files)
+		m.buildFileTree()
+		return m, nil
+
+	case allDiffsLoadedMsg:
+		m.diffFiles = msg.files
+		return m, nil
+
+	case filesChangedMsg:
+		// Files have changed, reload everything
+		m.files = msg.files
+		m.lastFileHash = msg.hash
+		m.buildFileTree()
+		m.diffFiles = nil // Clear old diffs
+		// Reload diffs
+		return m, tea.Batch(
+			m.LoadAllDiffs(),
+			tea.Tick(time.Second*2, func(t time.Time) tea.Msg {
+				return TickMsg{time: t.Second()}
+			}),
+		)
+
+	case diffLoadedMsg:
+		// Only append if the file has actual content (not empty)
+		if msg.file.Path != "" {
+			m.diffFiles = append(m.diffFiles, msg.file)
+		}
+		return m, nil
+
+	case errMsg:
+		m.err = msg.err
+		return m, nil
+
+	case clearErrorMsg:
+		m.err = nil
+		return m, nil
+}
 
 	return m, nil
 }
@@ -334,4 +381,42 @@ func getFileName(path string) string {
 		return parts[len(parts)-1]
 	}
 	return path
+}
+
+// checkForChanges checks if the git repo has changed and reloads if necessary
+func (m Model) checkForChanges() tea.Cmd {
+	return func() tea.Msg {
+		// Get current files and compute a hash
+		files, err := GetChangedFiles(m.diffMode)
+		if err != nil {
+			return errMsg{err}
+		}
+
+		// Compute a simple hash of the current state
+		currentHash := computeFileHash(files)
+
+		if currentHash != m.lastFileHash {
+			// Files have changed, reload everything
+			return filesChangedMsg{
+				files: files,
+				hash:  currentHash,
+			}
+		}
+
+		// No changes, just continue ticking
+		return TickMsg{time: 0}
+	}
+}
+
+// computeFileHash creates a simple hash string from the list of files
+func computeFileHash(files []FileDiff) string {
+	if len(files) == 0 {
+		return "empty"
+	}
+
+	result := ""
+	for _, f := range files {
+		result += f.Path + string(rune(f.ChangeType))
+	}
+	return result
 }
