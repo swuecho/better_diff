@@ -511,7 +511,7 @@ func (gs *GitService) GetCommitsAheadOfMain() ([]Commit, error) {
 	}
 
 	// Get merge base
-	mergeBase, err := getMergeBase(gs.repo, currentCommit, defaultCommit)
+	mergeBase, err := getMergeBase(currentCommit, defaultCommit)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get merge base: %w", err)
 	}
@@ -561,47 +561,24 @@ func (gs *GitService) GetCommitsAheadOfMain() ([]Commit, error) {
 	return commits, nil
 }
 
-// getMergeBase finds the merge base of two commits
-func getMergeBase(repo *git.Repository, commit1, commit2 *object.Commit) (*object.Commit, error) {
-	// Simple implementation: find common ancestor
-	// Get all ancestors of commit1
-	ancestors1 := make(map[string]struct{})
-	iter1, err := repo.Log(&git.LogOptions{
-		From:  commit1.Hash,
-		Order: git.LogOrderCommitterTime,
-	})
+// getMergeBase finds the merge base of two commits using go-git's graph algorithm.
+func getMergeBase(commit1, commit2 *object.Commit) (*object.Commit, error) {
+	bases, err := commit1.MergeBase(commit2)
 	if err != nil {
 		return nil, err
 	}
-
-	iter1.ForEach(func(c *object.Commit) error {
-		ancestors1[c.Hash.String()] = struct{}{}
-		return nil
-	})
-
-	// Find first ancestor of commit2 that's also in ancestors1
-	iter2, err := repo.Log(&git.LogOptions{
-		From:  commit2.Hash,
-		Order: git.LogOrderCommitterTime,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	var mergeBase *object.Commit
-	iter2.ForEach(func(c *object.Commit) error {
-		if _, ok := ancestors1[c.Hash.String()]; ok {
-			mergeBase = c
-			return fmt.Errorf("found")
-		}
-		return nil
-	})
-
-	if mergeBase == nil {
+	if len(bases) == 0 {
 		return nil, fmt.Errorf("no common ancestor found")
 	}
 
-	return mergeBase, nil
+	// If multiple merge bases exist, prefer the most recent one for deterministic behavior.
+	best := bases[0]
+	for _, c := range bases[1:] {
+		if c.Author.When.After(best.Author.When) {
+			best = c
+		}
+	}
+	return best, nil
 }
 
 // getFirstLine extracts the first line from a multi-line message

@@ -315,7 +315,10 @@ func TestGetChangedFiles(t *testing.T) {
 // TestGetDiff tests getting diffs for changed files
 func TestGetDiff(t *testing.T) {
 	gitService := setupGitService(t)
-	logger := NewLogger(INFO) // Create a test logger
+	logger, err := NewLogger(INFO, "") // Create a test logger
+	if err != nil {
+		t.Logf("logger fallback in tests: %v", err)
+	}
 
 	// Create a temporary test file
 	tmpFile := "test_temp_file.txt"

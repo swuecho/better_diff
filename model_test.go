@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -12,7 +13,10 @@ func setupModel(t *testing.T) Model {
 	if err != nil {
 		t.Skipf("Skipping test: git service not available: %v", err)
 	}
-	logger := NewLogger(INFO)
+	logger, err := NewLogger(INFO, "")
+	if err != nil {
+		t.Logf("logger fallback in tests: %v", err)
+	}
 	return NewModel(gitService, logger)
 }
 
@@ -21,7 +25,10 @@ func TestNewModel(t *testing.T) {
 	if err != nil {
 		t.Skip("Skipping test: git service not available")
 	}
-	logger := NewLogger(INFO)
+	logger, err := NewLogger(INFO, "")
+	if err != nil {
+		t.Logf("logger fallback in tests: %v", err)
+	}
 
 	model := NewModel(gitService, logger)
 
@@ -126,7 +133,7 @@ func TestModelUpdateNavigation(t *testing.T) {
 func TestModelUpdateToggleStaged(t *testing.T) {
 	model := setupModel(t)
 
-	// Test 's' key to toggle staging
+	// Unstaged -> Staged
 	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}}
 	newModel, _ := model.Update(msg)
 
@@ -134,12 +141,20 @@ func TestModelUpdateToggleStaged(t *testing.T) {
 		t.Errorf("Update('s') diffMode = %v, want %v", newModel.(Model).diffMode, Staged)
 	}
 
-	// Toggle again
+	// Staged -> BranchCompare
+	msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}}
+	newModel, _ = newModel.Update(msg)
+
+	if newModel.(Model).diffMode != BranchCompare {
+		t.Errorf("Update('s') second toggle diffMode = %v, want %v", newModel.(Model).diffMode, BranchCompare)
+	}
+
+	// BranchCompare -> Unstaged
 	msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}}
 	newModel, _ = newModel.Update(msg)
 
 	if newModel.(Model).diffMode != Unstaged {
-		t.Errorf("Update('s') second toggle diffMode = %v, want %v", newModel.(Model).diffMode, Unstaged)
+		t.Errorf("Update('s') third toggle diffMode = %v, want %v", newModel.(Model).diffMode, Unstaged)
 	}
 }
 
@@ -516,18 +531,21 @@ func (e *testError) Error() string {
 	return e.msg
 }
 
-// TestTickMsg tests the tick message processing
-func TestTickMsg(t *testing.T) {
+// TestFSChangeMsg tests file-change message processing
+func TestFSChangeMsg(t *testing.T) {
 	model := setupModel(t)
 	model.lastFileHash = "test"
 
-	msg := TickMsg{time: 0}
-	newModel, _ := model.Update(msg)
+	msg := FSChangeMsg{time: time.Now()}
+	newModel, cmd := model.Update(msg)
 
-	// TickMsg should trigger checkForChanges
-	// Since we haven't actually changed files, the hash should remain the same
+	if cmd == nil {
+		t.Error("FSChangeMsg should trigger a command to check for changes")
+	}
+
+	// The update should not mutate state immediately.
 	m := newModel.(Model)
 	if m.lastFileHash != "test" {
-		t.Errorf("TickMsg should not change hash if no changes, got %v", m.lastFileHash)
+		t.Errorf("FSChangeMsg should not change hash immediately, got %v", m.lastFileHash)
 	}
 }

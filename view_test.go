@@ -12,7 +12,10 @@ func setupModelForView(t *testing.T) Model {
 	if err != nil {
 		t.Skipf("Skipping test: git service not available: %v", err)
 	}
-	logger := NewLogger(WARN) // Use WARN to reduce noise in view tests
+	logger, err := NewLogger(WARN, "") // Use WARN to reduce noise in view tests
+	if err != nil {
+		t.Logf("logger fallback in tests: %v", err)
+	}
 	return NewModel(gitService, logger)
 }
 

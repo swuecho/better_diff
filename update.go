@@ -1,6 +1,10 @@
 package main
 
 import (
+	"fmt"
+	"hash/fnv"
+	"sort"
+
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -206,9 +210,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case allDiffsLoadedMsg:
 		m.diffFiles = msg.files
+		m.lastFileHash = computeDiffHash(msg.files)
 		if m.diffMode == BranchCompare {
 			m.files = aggregateBranchCompareFiles(msg.files)
-			m.lastFileHash = computeFileHash(m.files)
 			m.buildFileTree()
 			if m.selectedIndex >= len(m.flattenTree()) {
 				m.selectedIndex = 0
@@ -656,7 +660,13 @@ func buildTreeNodes(dir *dirNode, depth int) []TreeNode {
 	var nodes []TreeNode
 
 	// Add subdirectories first
-	for _, subdir := range dir.subdirs {
+	subdirNames := make([]string, 0, len(dir.subdirs))
+	for name := range dir.subdirs {
+		subdirNames = append(subdirNames, name)
+	}
+	sort.Strings(subdirNames)
+	for _, name := range subdirNames {
+		subdir := dir.subdirs[name]
 		childNodes := buildTreeNodes(subdir, depth+1)
 		totalAdded, totalRemoved := getDirStats(subdir)
 		nodes = append(nodes, TreeNode{
@@ -672,6 +682,9 @@ func buildTreeNodes(dir *dirNode, depth int) []TreeNode {
 	}
 
 	// Add files
+	sort.Slice(dir.files, func(i, j int) bool {
+		return dir.files[i].Path < dir.files[j].Path
+	})
 	for _, file := range dir.files {
 		nodes = append(nodes, TreeNode{
 			name:         getFileName(file.Path),
@@ -776,37 +789,7 @@ func (m Model) checkForChanges() tea.Cmd {
 			return nil
 		}
 
-		// Get current files and compute a hash
-		files, err := m.git.GetChangedFiles(m.diffMode)
-		if err != nil {
-			if m.logger != nil {
-				m.logger.Error("Failed to check for changes", err, map[string]interface{}{
-					"mode": m.diffMode,
-				})
-			}
-			// Continue watching despite error
-			return nil
-		}
-
-		// Compute a simple hash of the current state.
-		currentHash := computeFileHash(files)
 		if m.diffMode == BranchCompare {
-			stagedFiles, err := m.git.GetChangedFiles(Staged)
-			if err != nil {
-				if m.logger != nil {
-					m.logger.Error("Failed to check staged changes in branch compare", err, nil)
-				}
-				return nil
-			}
-
-			unstagedFiles, err := m.git.GetChangedFiles(Unstaged)
-			if err != nil {
-				if m.logger != nil {
-					m.logger.Error("Failed to check unstaged changes in branch compare", err, nil)
-				}
-				return nil
-			}
-
 			commits, err := m.git.GetCommitsAheadOfMain()
 			if err != nil {
 				if m.logger != nil {
@@ -815,14 +798,56 @@ func (m Model) checkForChanges() tea.Cmd {
 				return nil
 			}
 
-			currentHash = computeFileHash(stagedFiles) + "|" + computeFileHash(unstagedFiles)
+			stagedDiffs, unstagedDiffs, err := m.git.GetBranchCompareDiffs(m.diffViewMode, m.diffContext, m.logger)
+			if err != nil {
+				if m.logger != nil {
+					m.logger.Error("Failed to check staged/unstaged diffs in branch compare", err, nil)
+				}
+				return nil
+			}
+
+			combined := make([]FileDiff, 0, len(stagedDiffs)+len(unstagedDiffs))
+			combined = append(combined, stagedDiffs...)
+			combined = append(combined, unstagedDiffs...)
+			currentHash := computeDiffHash(combined)
 			for _, c := range commits {
 				currentHash += "|" + c.Hash
 			}
+
+			if currentHash != m.lastFileHash {
+				if m.logger != nil {
+					m.logger.Info("Repository changes detected", map[string]interface{}{
+						"previous_hash": m.lastFileHash,
+						"new_hash":      currentHash,
+					})
+				}
+				return filesChangedMsg{hash: currentHash}
+			}
+			return nil
 		}
 
+		files, err := m.git.GetChangedFiles(m.diffMode)
+		if err != nil {
+			if m.logger != nil {
+				m.logger.Error("Failed to check file list for changes", err, map[string]interface{}{
+					"mode": m.diffMode,
+				})
+			}
+			return nil
+		}
+
+		diffs, err := m.git.GetDiffWithContext(m.diffMode, m.diffViewMode, m.diffContext, m.logger)
+		if err != nil {
+			if m.logger != nil {
+				m.logger.Error("Failed to check diff content for changes", err, map[string]interface{}{
+					"mode": m.diffMode,
+				})
+			}
+			return nil
+		}
+		currentHash := computeDiffHash(diffs)
+
 		if currentHash != m.lastFileHash {
-			// Files have changed, reload everything
 			if m.logger != nil {
 				m.logger.Info("Repository changes detected", map[string]interface{}{
 					"previous_hash": m.lastFileHash,
@@ -830,10 +855,7 @@ func (m Model) checkForChanges() tea.Cmd {
 					"file_count":    len(files),
 				})
 			}
-			return filesChangedMsg{
-				files: files,
-				hash:  currentHash,
-			}
+			return filesChangedMsg{files: files, hash: currentHash}
 		}
 
 		// No changes
@@ -847,11 +869,45 @@ func computeFileHash(files []FileDiff) string {
 		return "empty"
 	}
 
-	result := ""
-	for _, f := range files {
-		result += f.Path + string(rune(f.ChangeType))
+	sorted := append([]FileDiff(nil), files...)
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].Path == sorted[j].Path {
+			return sorted[i].ChangeType < sorted[j].ChangeType
+		}
+		return sorted[i].Path < sorted[j].Path
+	})
+
+	h := fnv.New64a()
+	for _, f := range sorted {
+		_, _ = h.Write([]byte(fmt.Sprintf("%s|%d|%d|%d\n", f.Path, f.ChangeType, f.LinesAdded, f.LinesRemoved)))
 	}
-	return result
+	return fmt.Sprintf("%x", h.Sum64())
+}
+
+func computeDiffHash(files []FileDiff) string {
+	if len(files) == 0 {
+		return "empty"
+	}
+
+	sorted := append([]FileDiff(nil), files...)
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].Path == sorted[j].Path {
+			return sorted[i].ChangeType < sorted[j].ChangeType
+		}
+		return sorted[i].Path < sorted[j].Path
+	})
+
+	h := fnv.New64a()
+	for _, f := range sorted {
+		_, _ = h.Write([]byte(fmt.Sprintf("%s|%d|%d|%d\n", f.Path, f.ChangeType, f.LinesAdded, f.LinesRemoved)))
+		for _, hk := range f.Hunks {
+			_, _ = h.Write([]byte(fmt.Sprintf("@@%d,%d,%d,%d\n", hk.OldStart, hk.OldCount, hk.NewStart, hk.NewCount)))
+			for _, dl := range hk.Lines {
+				_, _ = h.Write([]byte(fmt.Sprintf("%d|%s\n", dl.Type, dl.Content)))
+			}
+		}
+	}
+	return fmt.Sprintf("%x", h.Sum64())
 }
 
 func aggregateBranchCompareFiles(diffFiles []FileDiff) []FileDiff {

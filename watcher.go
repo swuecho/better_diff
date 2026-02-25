@@ -2,7 +2,10 @@ package main
 
 import (
 	"errors"
+	"io/fs"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -16,13 +19,14 @@ type FSChangeMsg struct {
 
 // Watcher handles file system watching
 type Watcher struct {
-	watcher     *fsnotify.Watcher
-	gitPath     string
-	isWatching  bool
+	watcher    *fsnotify.Watcher
+	rootPath   string
+	gitPath    string
+	isWatching bool
 }
 
 // NewWatcher creates a new file system watcher
-func NewWatcher(gitPath string) (*Watcher, error) {
+func NewWatcher(rootPath string) (*Watcher, error) {
 	fsWatcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
@@ -30,17 +34,24 @@ func NewWatcher(gitPath string) (*Watcher, error) {
 
 	w := &Watcher{
 		watcher:    fsWatcher,
-		gitPath:    gitPath + "/.git",
+		rootPath:   rootPath,
+		gitPath:    filepath.Join(rootPath, ".git"),
 		isWatching: false,
+	}
+
+	// Watch working tree recursively (except .git) so unstaged edits are detected.
+	if err := w.addRecursiveDirs(w.rootPath); err != nil {
+		_ = fsWatcher.Close()
+		return nil, err
 	}
 
 	// Add key .git directories to watch
 	dirsToWatch := []string{
 		w.gitPath,
-		w.gitPath + "/HEAD",
-		w.gitPath + "/index",
-		w.gitPath + "/refs/heads",
-		w.gitPath + "/refs/tags",
+		filepath.Join(w.gitPath, "HEAD"),
+		filepath.Join(w.gitPath, "index"),
+		filepath.Join(w.gitPath, "refs", "heads"),
+		filepath.Join(w.gitPath, "refs", "tags"),
 	}
 
 	for _, dir := range dirsToWatch {
@@ -73,6 +84,12 @@ func (w *Watcher) WaitForChange() tea.Cmd {
 
 				// Filter for relevant events
 				if event.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Remove|fsnotify.Rename) != 0 {
+					// Track newly created directories so deep file changes are observed.
+					if event.Op&fsnotify.Create != 0 {
+						if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
+							_ = w.addRecursiveDirs(event.Name)
+						}
+					}
 					// Add a small debounce to handle rapid changes
 					time.Sleep(50 * time.Millisecond)
 					return FSChangeMsg{time: time.Now()}
@@ -96,4 +113,29 @@ func (w *Watcher) Close() error {
 
 	w.isWatching = false
 	return w.watcher.Close()
+}
+
+func (w *Watcher) addRecursiveDirs(root string) error {
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		if w.isGitDir(path) {
+			return filepath.SkipDir
+		}
+		if err := w.watcher.Add(path); err != nil {
+			return nil
+		}
+		return nil
+	})
+}
+
+func (w *Watcher) isGitDir(path string) bool {
+	if path == w.gitPath {
+		return true
+	}
+	return strings.HasPrefix(path, w.gitPath+string(os.PathSeparator))
 }
