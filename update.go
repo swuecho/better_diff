@@ -87,6 +87,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.diffFiles = nil
 			m.files = nil // Clear to force reload
 			m.commits = nil // Clear commits
+			m.selectedCommit = nil // Clear selected commit
 
 			if m.diffMode == BranchCompare {
 				return m, m.LoadCommitsAhead()
@@ -156,10 +157,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case commitsLoadedMsg:
 		m.commits = msg.commits
-		// Also load both staged and unstaged diffs for branch compare mode
-		if m.diffMode == BranchCompare {
-			// Load both staged and unstaged changes
-			return m, m.LoadAllDiffs()
+		m.selectedCommit = nil // Reset selected commit
+		m.diffFiles = nil // Clear previous diffs
+		// If there are commits, auto-select the first one
+		if len(m.commits) > 0 {
+			m.selectedCommit = &m.commits[0]
+			return m, m.LoadCommitDiff(m.selectedCommit.Hash)
 		}
 		return m, nil
 
@@ -375,9 +378,17 @@ func (m *Model) getDiffLineCount() int {
 
 // selectItem handles selection of current item
 func (m *Model) selectItem() tea.Cmd {
-	// In branch compare mode, commits are displayed but not selectable
+	// In branch compare mode, select commit and load its diff
 	if m.diffMode == BranchCompare {
-		return nil
+		if m.selectedIndex >= len(m.commits) {
+			return nil
+		}
+		// Set the selected commit
+		m.selectedCommit = &m.commits[m.selectedIndex]
+		// Reset diff scroll
+		m.diffScroll = 0
+		// Load diff for this commit
+		return m.LoadCommitDiff(m.selectedCommit.Hash)
 	}
 
 	flatTree := m.flattenTree()

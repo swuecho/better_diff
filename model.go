@@ -14,27 +14,28 @@ const (
 
 // Model holds the application state
 type Model struct {
-	git           *GitService // Git service (dependency injection)
-	logger        *Logger     // Logger for error tracking
-	watcher       *Watcher    // File system watcher
-	files         []FileDiff
-	diffFiles     []FileDiff // Files with full diff content
-	fileTree      []TreeNode
-	commits       []Commit   // Commits ahead of main branch
-	selectedIndex int
-	panel         Panel
-	diffMode      DiffMode
-	diffViewMode  DiffViewMode // Diff view mode (diff-only or whole file)
-	scrollOffset  int          // For file tree scrolling
-	diffScroll    int          // For diff panel scrolling
-	width         int
-	height        int
-	rootPath      string
-	branch        string
-	quitting      bool
-	showHelp      bool // Help modal visibility
-	err           error
-	lastFileHash  string // To detect changes in files
+	git             *GitService // Git service (dependency injection)
+	logger          *Logger     // Logger for error tracking
+	watcher         *Watcher    // File system watcher
+	files           []FileDiff
+	diffFiles       []FileDiff // Files with full diff content
+	fileTree        []TreeNode
+	commits         []Commit   // Commits ahead of main branch
+	selectedCommit  *Commit    // Currently selected commit in branch compare mode
+	selectedIndex   int
+	panel           Panel
+	diffMode        DiffMode
+	diffViewMode    DiffViewMode // Diff view mode (diff-only or whole file)
+	scrollOffset    int          // For file tree scrolling
+	diffScroll      int          // For diff panel scrolling
+	width           int
+	height          int
+	rootPath        string
+	branch          string
+	quitting        bool
+	showHelp        bool // Help modal visibility
+	err             error
+	lastFileHash    string // To detect changes in files
 }
 
 // TreeNode represents a node in the file tree
@@ -179,6 +180,26 @@ func (m Model) LoadCommitsAhead() tea.Cmd {
 			return errMsg{err}
 		}
 		return commitsLoadedMsg{commits}
+	}
+}
+
+// LoadCommitDiff loads the diff for a specific commit
+func (m Model) LoadCommitDiff(commitHash string) tea.Cmd {
+	return func() tea.Msg {
+		if m.git == nil {
+			return errMsg{&ServiceError{Message: "Git service not initialized"}}
+		}
+
+		files, err := m.git.GetCommitDiff(commitHash, m.logger)
+		if err != nil {
+			if m.logger != nil {
+				m.logger.Error("Failed to get commit diff", err, map[string]interface{}{
+					"commit": commitHash,
+				})
+			}
+			return errMsg{err}
+		}
+		return allDiffsLoadedMsg{files}
 	}
 }
 

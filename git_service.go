@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/format/diff"
 	"github.com/go-git/go-git/v5/plumbing/format/index"
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
@@ -617,4 +618,158 @@ func (gs *GitService) GetBranchCompareDiffs(logger *Logger) ([]FileDiff, []FileD
 	}
 
 	return staged, unstaged, nil
+}
+
+// GetCommitDiff gets the diff for a specific commit (compares commit to its parent)
+func (gs *GitService) GetCommitDiff(commitHash string, logger *Logger) ([]FileDiff, error) {
+	// Get the commit object
+	hash := plumbing.NewHash(commitHash)
+	commit, err := gs.repo.CommitObject(hash)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get commit: %w", err)
+	}
+
+	// Get parent commit
+	var parentCommit *object.Commit
+	if len(commit.ParentHashes) > 0 {
+		parentCommit, err = gs.repo.CommitObject(commit.ParentHashes[0])
+		if err != nil {
+			return nil, fmt.Errorf("failed to get parent commit: %w", err)
+		}
+	} else {
+		// This is the first commit (no parent), compare to empty tree
+		return []FileDiff{}, nil
+	}
+
+	// Get the diff between parent and current commit
+	patch, err := parentCommit.Patch(commit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get patch: %w", err)
+	}
+
+	// Convert patch to FileDiffs
+	var files []FileDiff
+	for _, filePatch := range patch.FilePatches() {
+		from, to := filePatch.Files()
+		path := "unknown"
+		changeType := Modified
+
+		if from != nil {
+			path = from.Path()
+		}
+		if to != nil {
+			path = to.Path()
+		}
+
+		// Determine change type
+		if from == nil && to != nil {
+			changeType = Added
+		} else if from != nil && to == nil {
+			changeType = Deleted
+		} else if from != nil && to != nil && from.Path() != to.Path() {
+			changeType = Renamed
+		}
+
+		// Generate hunks from patch
+		hunks, err := convertPatchToHunks(filePatch)
+		if err != nil && logger != nil {
+			logger.Warn("Failed to convert patch to hunks", map[string]interface{}{
+				"file": path,
+				"error": err,
+			})
+			continue
+		}
+
+		// Count lines
+		linesAdded := 0
+		linesRemoved := 0
+		for _, hunk := range hunks {
+			for _, line := range hunk.Lines {
+				if line.Type == LineAdded {
+					linesAdded++
+				} else if line.Type == LineRemoved {
+					linesRemoved++
+				}
+			}
+		}
+
+		files = append(files, FileDiff{
+			Path:         path,
+			ChangeType:   changeType,
+			Hunks:        hunks,
+			LinesAdded:   linesAdded,
+			LinesRemoved: linesRemoved,
+		})
+	}
+
+	return files, nil
+}
+
+// convertPatchToHunks converts a git Patch to our Hunk format
+func convertPatchToHunks(filePatch diff.FilePatch) ([]Hunk, error) {
+	// Get the patch content for this file
+	var patchText string
+	for _, chunk := range filePatch.Chunks() {
+		patchText += chunk.Content()
+	}
+
+	// Parse the unified diff format
+	lines := splitLines(patchText)
+	var hunks []Hunk
+	var currentHunk *Hunk
+
+	for _, line := range lines {
+		// Skip empty lines
+		if len(line) == 0 {
+			continue
+		}
+
+		// Check for hunk header (@@ -oldStart,oldCount +newStart,newCount @@)
+		if len(line) > 2 && line[0] == '@' && line[1] == '@' {
+			if currentHunk != nil {
+				hunks = append(hunks, *currentHunk)
+			}
+			// Start new hunk
+			currentHunk = &Hunk{
+				Lines: []DiffLine{},
+			}
+			continue
+		}
+
+		if currentHunk == nil {
+			// Haven't hit a hunk header yet, skip pre-amble
+			continue
+		}
+
+		// Parse diff lines
+		var lineType LineType
+		var content string
+
+		switch line[0] {
+		case '+':
+			lineType = LineAdded
+			content = line[1:]
+		case '-':
+			lineType = LineRemoved
+			content = line[1:]
+		case ' ':
+			lineType = LineContext
+			content = line[1:]
+		default:
+			// Skip any other lines (like binary file markers)
+			continue
+		}
+
+		currentHunk.Lines = append(currentHunk.Lines, DiffLine{
+			Type:    lineType,
+			Content: content,
+			LineNum: 0,
+		})
+	}
+
+	if currentHunk != nil {
+		hunks = append(hunks, *currentHunk)
+	}
+
+	return hunks, nil
 }

@@ -281,16 +281,30 @@ func (m Model) renderDiffPanel(width, height int) string {
 		Foreground(lipgloss.Color("244")). // Subtle gray
 		Bold(false)
 
-	// Get selected file
-	var selectedFile *FileDiff
-	flatTree := m.flattenTree()
-	if m.selectedIndex < len(flatTree) {
-		node := flatTree[m.selectedIndex]
-		if !node.isDir {
-			for i := range m.diffFiles {
-				if m.diffFiles[i].Path == node.path {
-					selectedFile = &m.diffFiles[i]
-					break
+	// File header style
+	fileHeaderStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("75")). // Blue
+		Bold(true)
+
+	// Get selected file (or all files for branch compare)
+	var filesToRender []*FileDiff
+
+	if m.diffMode == BranchCompare && m.selectedCommit != nil {
+		// Show all files in the commit
+		for i := range m.diffFiles {
+			filesToRender = append(filesToRender, &m.diffFiles[i])
+		}
+	} else {
+		// Show selected file from tree
+		flatTree := m.flattenTree()
+		if m.selectedIndex < len(flatTree) {
+			node := flatTree[m.selectedIndex]
+			if !node.isDir {
+				for i := range m.diffFiles {
+					if m.diffFiles[i].Path == node.path {
+						filesToRender = append(filesToRender, &m.diffFiles[i])
+						break
+					}
 				}
 			}
 		}
@@ -298,50 +312,74 @@ func (m Model) renderDiffPanel(width, height int) string {
 
 	// Render all diff lines first
 	var allLines []string
-	if selectedFile != nil {
-		if len(selectedFile.Hunks) == 0 {
-			// File has no hunks (binary file or no changes)
-			allLines = append(allLines, lipgloss.NewStyle().
-				Foreground(lipgloss.Color("243")).
-				Italic(true).
-				Render("No diff content available (binary file or no changes)"))
-		} else {
-			for _, hunk := range selectedFile.Hunks {
-				// Add hunk header
-				allLines = append(allLines, hunkStyle.Render("─"))
 
-				for _, diffLine := range hunk.Lines {
-					var prefix string
-					var prefixStyle lipgloss.Style
-					var contentStyle lipgloss.Style
+	if m.diffMode == BranchCompare && m.selectedCommit != nil {
+		// Add commit info header
+		commitHeaderStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("86")).
+			Bold(true)
+		allLines = append(allLines, commitHeaderStyle.Render("Commit: "+m.selectedCommit.ShortHash+" "+m.selectedCommit.Message))
+		allLines = append(allLines, "")
+	}
 
-					switch diffLine.Type {
-					case LineAdded:
-						prefix = "+"
-						prefixStyle = addedPrefixStyle
-						contentStyle = addedStyle
-					case LineRemoved:
-						prefix = "-"
-						prefixStyle = removedPrefixStyle
-						contentStyle = removedStyle
-					default:
-						prefix = " "
-						prefixStyle = contextStyle
-						contentStyle = contextStyle
-					}
-
-					// Render prefix and content separately for better styling
-					line := prefixStyle.Render(prefix) + " " + contentStyle.Render(diffLine.Content)
-					allLines = append(allLines, line)
-				}
-			}
-		}
-	} else {
+	if len(filesToRender) == 0 {
 		// No file selected
+		msg := "Select a file to view diff"
+		if m.diffMode == BranchCompare {
+			msg = "Select a commit to view changes"
+		}
 		allLines = append(allLines, lipgloss.NewStyle().
 			Foreground(lipgloss.Color("243")).
 			Italic(true).
-			Render("Select a file to view diff"))
+			Render(msg))
+	} else {
+		for fileIdx, selectedFile := range filesToRender {
+			if fileIdx > 0 {
+				allLines = append(allLines, "")
+				allLines = append(allLines, hunkStyle.Render("════════════════════════════════════"))
+			}
+
+			// Add file path header
+			allLines = append(allLines, fileHeaderStyle.Render("📄 "+selectedFile.Path))
+
+			if len(selectedFile.Hunks) == 0 {
+				// File has no hunks (binary file or no changes)
+				allLines = append(allLines, lipgloss.NewStyle().
+					Foreground(lipgloss.Color("243")).
+					Italic(true).
+					Render("No diff content available (binary file or no changes)"))
+			} else {
+				for _, hunk := range selectedFile.Hunks {
+					// Add hunk header
+					allLines = append(allLines, hunkStyle.Render("─"))
+
+					for _, diffLine := range hunk.Lines {
+						var prefix string
+						var prefixStyle lipgloss.Style
+						var contentStyle lipgloss.Style
+
+						switch diffLine.Type {
+						case LineAdded:
+							prefix = "+"
+							prefixStyle = addedPrefixStyle
+							contentStyle = addedStyle
+						case LineRemoved:
+							prefix = "-"
+							prefixStyle = removedPrefixStyle
+							contentStyle = removedStyle
+						default:
+							prefix = " "
+							prefixStyle = contextStyle
+							contentStyle = contextStyle
+						}
+
+						// Render prefix and content separately for better styling
+						line := prefixStyle.Render(prefix) + " " + contentStyle.Render(diffLine.Content)
+						allLines = append(allLines, line)
+					}
+				}
+			}
+		}
 	}
 
 	// Apply scrolling
