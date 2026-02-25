@@ -37,6 +37,7 @@ type Model struct {
 	err            error
 	lastFileHash   string // To detect changes in files
 	vimPendingG    bool   // Tracks first "g" for "gg" in whole-file navigation
+	diffContext    int    // Context lines in Diff Only mode
 }
 
 // TreeNode represents a node in the file tree
@@ -60,6 +61,7 @@ func NewModel(gitService *GitService, logger *Logger) Model {
 		panel:        FileTreePanel,
 		diffMode:     Unstaged,
 		diffViewMode: DiffOnly,
+		diffContext:  DefaultDiffContext,
 		scrollOffset: 0,
 		diffScroll:   0,
 	}
@@ -126,7 +128,7 @@ func (m Model) LoadDiff(path string) tea.Cmd {
 			return errMsg{&ServiceError{Message: "Git service not initialized"}}
 		}
 
-		files, err := m.git.GetDiff(m.diffMode, m.diffViewMode, m.logger)
+		files, err := m.git.GetDiffWithContext(m.diffMode, m.diffViewMode, m.diffContext, m.logger)
 		if err != nil {
 			if m.logger != nil {
 				m.logger.Error("Failed to get diff", err, map[string]interface{}{
@@ -153,7 +155,7 @@ func (m Model) LoadAllDiffs() tea.Cmd {
 			return errMsg{&ServiceError{Message: "Git service not initialized"}}
 		}
 
-		files, err := m.git.GetDiff(m.diffMode, m.diffViewMode, m.logger)
+		files, err := m.git.GetDiffWithContext(m.diffMode, m.diffViewMode, m.diffContext, m.logger)
 		if err != nil {
 			if m.logger != nil {
 				m.logger.Error("Failed to get all diffs", err, map[string]interface{}{
@@ -229,7 +231,7 @@ func (m Model) LoadBranchCompareDiff(commits []Commit) tea.Cmd {
 		}
 
 		// Include staged and unstaged working changes.
-		staged, unstaged, err := m.git.GetBranchCompareDiffs(m.diffViewMode, m.logger)
+		staged, unstaged, err := m.git.GetBranchCompareDiffs(m.diffViewMode, m.diffContext, m.logger)
 		if err != nil {
 			if m.logger != nil {
 				m.logger.Error("Failed to get staged/unstaged diffs for branch compare", err, nil)

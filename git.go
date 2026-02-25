@@ -88,9 +88,18 @@ const (
 	MaxFileSize = 10 * 1024 * 1024
 )
 
-// computeHunks computes diff hunks using Myers diff algorithm
+// computeHunks computes diff hunks using the default context size.
 func computeHunks(oldLines, newLines []string) ([]Hunk, error) {
+	return computeHunksWithContext(oldLines, newLines, DefaultDiffContext)
+}
+
+// computeHunksWithContext computes diff hunks using Myers diff algorithm with a custom context size.
+func computeHunksWithContext(oldLines, newLines []string, contextLines int) ([]Hunk, error) {
 	dmp := diffmatchpatch.New()
+
+	if contextLines < 0 {
+		contextLines = 0
+	}
 
 	// Join lines with newline to create the full text
 	oldText := strings.Join(oldLines, "\n")
@@ -175,7 +184,7 @@ func computeHunks(oldLines, newLines []string) ([]Hunk, error) {
 				}
 
 				// Only close if we have actual changes and enough context
-				if trailingContext >= DefaultDiffContext {
+				if trailingContext >= contextLines {
 					hasChanges := false
 					for _, l := range currentHunk.Lines {
 						if l.Type != LineContext {
@@ -188,9 +197,9 @@ func computeHunks(oldLines, newLines []string) ([]Hunk, error) {
 						currentHunk.OldCount = oldLineNum - currentHunk.OldStart - trailingContext
 						currentHunk.NewCount = newLineNum - currentHunk.NewStart - trailingContext
 
-						// Trim to keep only DefaultDiffContext lines of trailing context
-						if trailingContext > DefaultDiffContext {
-							trimCount := trailingContext - DefaultDiffContext
+						// Trim to keep only contextLines lines of trailing context
+						if trailingContext > contextLines {
+							trimCount := trailingContext - contextLines
 							currentHunk.Lines = currentHunk.Lines[:len(currentHunk.Lines)-trimCount]
 						}
 
@@ -254,8 +263,8 @@ func computeHunks(oldLines, newLines []string) ([]Hunk, error) {
 			}
 		}
 
-		if trailingContext > DefaultDiffContext {
-			trimCount := trailingContext - DefaultDiffContext
+		if trailingContext > contextLines {
+			trimCount := trailingContext - contextLines
 			currentHunk.Lines = currentHunk.Lines[:len(currentHunk.Lines)-trimCount]
 			currentHunk.OldCount -= trimCount
 			currentHunk.NewCount -= trimCount

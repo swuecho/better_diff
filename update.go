@@ -28,7 +28,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "up", "k":
 			if m.panel == DiffPanel {
-				m.moveDiffUp()
+				if msg.String() == "k" && m.diffViewMode == DiffOnly {
+					m.jumpToPrevHunk()
+				} else {
+					m.moveDiffUp()
+				}
 			} else {
 				m.moveUp()
 			}
@@ -36,7 +40,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "down", "j":
 			if m.panel == DiffPanel {
-				m.moveDiffDown()
+				if msg.String() == "j" && m.diffViewMode == DiffOnly {
+					m.jumpToNextHunk()
+				} else {
+					m.moveDiffDown()
+				}
 			} else {
 				m.moveDown()
 			}
@@ -134,6 +142,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.LoadCommitsAhead()
 			}
 			return m, m.LoadAllDiffs()
+
+		case "o":
+			// Expand surrounding context in diff-only mode.
+			if m.diffViewMode == DiffOnly {
+				m.diffContext += DefaultDiffContext
+				return m, m.reloadCurrentDiffs()
+			}
+			return m, nil
+
+		case "O":
+			// Reset context expansion in diff-only mode.
+			if m.diffViewMode == DiffOnly {
+				m.diffContext = DefaultDiffContext
+				return m, m.reloadCurrentDiffs()
+			}
+			return m, nil
 
 		case "?":
 			// Toggle help screen
@@ -367,6 +391,13 @@ func (m *Model) moveDiffPageDown() {
 	}
 }
 
+func (m Model) reloadCurrentDiffs() tea.Cmd {
+	if m.diffMode == BranchCompare {
+		return m.LoadCommitsAhead()
+	}
+	return m.LoadAllDiffs()
+}
+
 // moveDiffToTop scrolls the diff view to the top.
 func (m *Model) moveDiffToTop() {
 	m.diffScroll = 0
@@ -391,48 +422,37 @@ func max(a, b int) int {
 
 // getDiffLineCount returns the total number of lines in the current diff
 func (m *Model) getDiffLineCount() int {
-	// In branch compare mode, count lines for all matching entries of selected file.
+	filesToRender := m.getSelectedDiffFiles()
+	if len(filesToRender) == 0 {
+		if m.diffMode == BranchCompare {
+			return 3 // branch header + blank + message
+		}
+		return 1 // message
+	}
+
+	lineCount := 0
 	if m.diffMode == BranchCompare {
-		flatTree := m.flattenTree()
-		if m.selectedIndex >= len(flatTree) {
-			return 0
-		}
-		node := flatTree[m.selectedIndex]
-		if node.isDir {
-			return 0
-		}
-
-		count := 0
-		for i := range m.diffFiles {
-			if m.diffFiles[i].Path == node.path {
-				for _, hunk := range m.diffFiles[i].Hunks {
-					count += 2 + len(hunk.Lines) // 2 for hunk header and spacing
-				}
-			}
-		}
-		return count
+		lineCount += 2 // branch header + blank
 	}
 
-	flatTree := m.flattenTree()
-	if m.selectedIndex >= len(flatTree) {
-		return 0
-	}
+	for fileIdx, selectedFile := range filesToRender {
+		if fileIdx > 0 {
+			lineCount += 2 // blank + separator
+		}
 
-	node := flatTree[m.selectedIndex]
-	if node.isDir {
-		return 0
-	}
+		lineCount++ // file header
+		if len(selectedFile.Hunks) == 0 {
+			lineCount++ // empty-file message
+			continue
+		}
 
-	for i := range m.diffFiles {
-		if m.diffFiles[i].Path == node.path {
-			count := 0
-			for _, hunk := range m.diffFiles[i].Hunks {
-				count += 2 + len(hunk.Lines) // 2 for hunk header (...)
-			}
-			return count
+		for _, hunk := range selectedFile.Hunks {
+			lineCount++ // hunk separator
+			lineCount += len(hunk.Lines)
 		}
 	}
-	return 0
+
+	return lineCount
 }
 
 // selectItem handles selection of current item
@@ -459,6 +479,101 @@ func (m *Model) selectItem() tea.Cmd {
 		// Load diff for the file
 		return m.LoadDiff(node.path)
 	}
+}
+
+func (m *Model) jumpToNextHunk() {
+	hunkStarts := m.getCurrentHunkStartLines()
+	if len(hunkStarts) == 0 {
+		return
+	}
+
+	for _, start := range hunkStarts {
+		if start > m.diffScroll {
+			m.diffScroll = start
+			return
+		}
+	}
+
+	m.diffScroll = hunkStarts[len(hunkStarts)-1]
+}
+
+func (m *Model) jumpToPrevHunk() {
+	hunkStarts := m.getCurrentHunkStartLines()
+	if len(hunkStarts) == 0 {
+		return
+	}
+
+	for i := len(hunkStarts) - 1; i >= 0; i-- {
+		if hunkStarts[i] < m.diffScroll {
+			m.diffScroll = hunkStarts[i]
+			return
+		}
+	}
+
+	m.diffScroll = hunkStarts[0]
+}
+
+func (m Model) getCurrentHunkStartLines() []int {
+	filesToRender := m.getSelectedDiffFiles()
+	if len(filesToRender) == 0 {
+		return nil
+	}
+
+	lineNum := 0
+	if m.diffMode == BranchCompare {
+		lineNum += 2 // branch header + blank
+	}
+
+	var starts []int
+	for fileIdx, selectedFile := range filesToRender {
+		if fileIdx > 0 {
+			lineNum += 2 // blank + separator
+		}
+
+		lineNum++ // file header
+		if len(selectedFile.Hunks) == 0 {
+			lineNum++ // no-hunk message
+			continue
+		}
+
+		for _, hunk := range selectedFile.Hunks {
+			starts = append(starts, lineNum)
+			lineNum++ // hunk separator line
+			lineNum += len(hunk.Lines)
+		}
+	}
+
+	return starts
+}
+
+func (m Model) getSelectedDiffFiles() []*FileDiff {
+	flatTree := m.flattenTree()
+	if m.selectedIndex >= len(flatTree) {
+		return nil
+	}
+
+	node := flatTree[m.selectedIndex]
+	if node.isDir {
+		return nil
+	}
+
+	var filesToRender []*FileDiff
+	if m.diffMode == BranchCompare {
+		for i := range m.diffFiles {
+			if m.diffFiles[i].Path == node.path {
+				filesToRender = append(filesToRender, &m.diffFiles[i])
+			}
+		}
+		return filesToRender
+	}
+
+	for i := range m.diffFiles {
+		if m.diffFiles[i].Path == node.path {
+			filesToRender = append(filesToRender, &m.diffFiles[i])
+			break
+		}
+	}
+	return filesToRender
 }
 
 // toggleDirectory toggles directory expansion

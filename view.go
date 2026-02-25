@@ -277,36 +277,7 @@ func (m Model) renderDiffPanel(width, height int) string {
 		Bold(true)
 
 	// Get selected file(s).
-	var filesToRender []*FileDiff
-
-	if m.diffMode == BranchCompare {
-		// Show all diff entries for selected path (commits + staged + unstaged).
-		flatTree := m.flattenTree()
-		if m.selectedIndex < len(flatTree) {
-			node := flatTree[m.selectedIndex]
-			if !node.isDir {
-				for i := range m.diffFiles {
-					if m.diffFiles[i].Path == node.path {
-						filesToRender = append(filesToRender, &m.diffFiles[i])
-					}
-				}
-			}
-		}
-	} else {
-		// Show selected file from tree
-		flatTree := m.flattenTree()
-		if m.selectedIndex < len(flatTree) {
-			node := flatTree[m.selectedIndex]
-			if !node.isDir {
-				for i := range m.diffFiles {
-					if m.diffFiles[i].Path == node.path {
-						filesToRender = append(filesToRender, &m.diffFiles[i])
-						break
-					}
-				}
-			}
-		}
-	}
+	filesToRender := m.getSelectedDiffFiles()
 
 	// Render all diff lines first
 	var allLines []string
@@ -440,6 +411,8 @@ func (m Model) renderFooter() string {
 	help := []string{
 		keyStyle.Render("[↑↓]") + " Navigate",
 		keyStyle.Render("[PgUp/PgDn]") + " Page",
+		keyStyle.Render("[j/k]") + " Hunk Jump",
+		keyStyle.Render("[o/O]") + " Expand/Reset",
 		keyStyle.Render("[gg/G]") + " Top/Bottom",
 		keyStyle.Render("[Enter]") + " Select/Expand",
 		keyStyle.Render("[Tab]") + " Switch Panel",

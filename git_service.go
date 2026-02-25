@@ -154,8 +154,13 @@ func (gs *GitService) GetChangedFiles(mode DiffMode) ([]FileDiff, error) {
 	return files, nil
 }
 
-// GetDiff gets the git diff based on mode
+// GetDiff gets the git diff based on mode with default context.
 func (gs *GitService) GetDiff(mode DiffMode, viewMode DiffViewMode, logger *Logger) ([]FileDiff, error) {
+	return gs.GetDiffWithContext(mode, viewMode, DefaultDiffContext, logger)
+}
+
+// GetDiffWithContext gets the git diff based on mode and configurable context lines.
+func (gs *GitService) GetDiffWithContext(mode DiffMode, viewMode DiffViewMode, contextLines int, logger *Logger) ([]FileDiff, error) {
 	worktree, err := gs.repo.Worktree()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get worktree: %w", err)
@@ -215,7 +220,7 @@ func (gs *GitService) GetDiff(mode DiffMode, viewMode DiffViewMode, logger *Logg
 			continue
 		}
 
-		fileDiff, err := gs.getFileDiff(worktree, idx, headCommit, path, mode, *fileStatus, logger)
+		fileDiff, err := gs.getFileDiff(worktree, idx, headCommit, path, mode, viewMode, contextLines, *fileStatus, logger)
 		if err != nil {
 			// Log error but continue with other files
 			if logger != nil {
@@ -236,7 +241,7 @@ func (gs *GitService) GetDiff(mode DiffMode, viewMode DiffViewMode, logger *Logg
 }
 
 // getFileDiff generates a FileDiff for a single file
-func (gs *GitService) getFileDiff(worktree *git.Worktree, idx *index.Index, headCommit *object.Commit, path string, mode DiffMode, fileStatus git.FileStatus, logger *Logger) (*FileDiff, error) {
+func (gs *GitService) getFileDiff(worktree *git.Worktree, idx *index.Index, headCommit *object.Commit, path string, mode DiffMode, viewMode DiffViewMode, contextLines int, fileStatus git.FileStatus, logger *Logger) (*FileDiff, error) {
 	var oldContent, newContent []byte
 	var changeType ChangeType
 
@@ -409,7 +414,12 @@ func (gs *GitService) getFileDiff(worktree *git.Worktree, idx *index.Index, head
 	oldLines := splitLines(string(oldContent))
 	newLines := splitLines(string(newContent))
 
-	hunks, err := computeHunks(oldLines, newLines)
+	effectiveContext := contextLines
+	if viewMode == WholeFile {
+		effectiveContext = WholeFileContext
+	}
+
+	hunks, err := computeHunksWithContext(oldLines, newLines, effectiveContext)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compute diff for %s: %w", path, err)
 	}
@@ -604,15 +614,15 @@ func getFirstLine(message string) string {
 }
 
 // GetBranchCompareDiffs gets both staged and unstaged changes for branch comparison.
-func (gs *GitService) GetBranchCompareDiffs(viewMode DiffViewMode, logger *Logger) ([]FileDiff, []FileDiff, error) {
+func (gs *GitService) GetBranchCompareDiffs(viewMode DiffViewMode, contextLines int, logger *Logger) ([]FileDiff, []FileDiff, error) {
 	// Get staged changes
-	staged, err := gs.GetDiff(Staged, viewMode, logger)
+	staged, err := gs.GetDiffWithContext(Staged, viewMode, contextLines, logger)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get staged changes: %w", err)
 	}
 
 	// Get unstaged changes
-	unstaged, err := gs.GetDiff(Unstaged, viewMode, logger)
+	unstaged, err := gs.GetDiffWithContext(Unstaged, viewMode, contextLines, logger)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get unstaged changes: %w", err)
 	}
