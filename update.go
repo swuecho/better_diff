@@ -16,6 +16,11 @@ type dirNode struct {
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// Any key other than "g" clears pending "gg" state.
+		if msg.String() != "g" {
+			m.vimPendingG = false
+		}
+
 		switch msg.String() {
 		case "q", "ctrl+c":
 			m.quitting = true
@@ -23,7 +28,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "up", "k":
 			if m.panel == DiffPanel {
-				m.moveDiffUp()
+				if msg.String() == "k" && m.diffViewMode == DiffOnly {
+					m.jumpToPrevHunk()
+				} else {
+					m.moveDiffUp()
+				}
 			} else {
 				m.moveUp()
 			}
@@ -31,7 +40,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "down", "j":
 			if m.panel == DiffPanel {
-				m.moveDiffDown()
+				if msg.String() == "j" && m.diffViewMode == DiffOnly {
+					m.jumpToNextHunk()
+				} else {
+					m.moveDiffDown()
+				}
 			} else {
 				m.moveDown()
 			}
@@ -50,6 +63,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.moveDiffPageDown()
 			} else {
 				m.movePageDown()
+			}
+			return m, nil
+
+		case "g":
+			// Vim-style: "gg" jumps to top in whole-file/diff panel navigation.
+			if m.diffViewMode == WholeFile || m.panel == DiffPanel {
+				if m.vimPendingG {
+					m.moveDiffToTop()
+					m.vimPendingG = false
+				} else {
+					m.vimPendingG = true
+				}
+				return m, nil
+			}
+			return m, nil
+
+		case "G":
+			// Vim-style: "G" jumps to bottom in whole-file/diff panel navigation.
+			if m.diffViewMode == WholeFile || m.panel == DiffPanel {
+				m.moveDiffToBottom()
+				return m, nil
 			}
 			return m, nil
 
@@ -85,8 +119,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.scrollOffset = 0
 			m.diffScroll = 0
 			m.diffFiles = nil
-			m.files = nil // Clear to force reload
-			m.commits = nil // Clear commits
+			m.files = nil          // Clear to force reload
+			m.commits = nil        // Clear commits
+			m.selectedCommit = nil // Clear selected commit
 
 			if m.diffMode == BranchCompare {
 				return m, m.LoadCommitsAhead()
@@ -103,7 +138,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.diffScroll = 0
 			m.diffFiles = nil
+			if m.diffMode == BranchCompare {
+				return m, m.LoadCommitsAhead()
+			}
 			return m, m.LoadAllDiffs()
+
+		case "o":
+			// Expand surrounding context in diff-only mode.
+			if m.diffViewMode == DiffOnly {
+				m.diffContext += DefaultDiffContext
+				return m, m.reloadCurrentDiffs()
+			}
+			return m, nil
+
+		case "O":
+			// Reset context expansion in diff-only mode.
+			if m.diffViewMode == DiffOnly {
+				m.diffContext = DefaultDiffContext
+				return m, m.reloadCurrentDiffs()
+			}
+			return m, nil
 
 		case "?":
 			// Toggle help screen
@@ -152,25 +206,37 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case allDiffsLoadedMsg:
 		m.diffFiles = msg.files
+		if m.diffMode == BranchCompare {
+			m.files = aggregateBranchCompareFiles(msg.files)
+			m.lastFileHash = computeFileHash(m.files)
+			m.buildFileTree()
+			if m.selectedIndex >= len(m.flattenTree()) {
+				m.selectedIndex = 0
+			}
+		}
 		return m, nil
 
 	case commitsLoadedMsg:
 		m.commits = msg.commits
-		// Also load both staged and unstaged diffs for branch compare mode
-		if m.diffMode == BranchCompare {
-			// Load both staged and unstaged changes
-			return m, m.LoadAllDiffs()
-		}
-		return m, nil
+		m.selectedCommit = nil // Reset selected commit
+		m.diffFiles = nil      // Clear previous diffs
+		return m, m.LoadBranchCompareDiff(m.commits)
 
 	case filesChangedMsg:
 		// Files have changed, reload everything
-		m.files = msg.files
-		m.lastFileHash = msg.hash
-		m.buildFileTree()
+		if m.diffMode != BranchCompare {
+			m.files = msg.files
+			m.lastFileHash = msg.hash
+			m.buildFileTree()
+		}
 		m.diffFiles = nil // Clear old diffs
 		// Reload diffs and continue watching
-		cmd := m.LoadAllDiffs()
+		var cmd tea.Cmd
+		if m.diffMode == BranchCompare {
+			cmd = m.LoadCommitsAhead()
+		} else {
+			cmd = m.LoadAllDiffs()
+		}
 		if m.watcher != nil {
 			return m, tea.Batch(cmd, m.watcher.WaitForChange())
 		}
@@ -228,7 +294,9 @@ func (m *Model) moveUp() {
 
 // moveDown moves the selection down
 func (m *Model) moveDown() {
-	if m.selectedIndex < len(m.flattenTree())-1 {
+	maxIndex := len(m.flattenTree()) - 1
+
+	if m.selectedIndex < maxIndex {
 		m.selectedIndex++
 
 		// Auto scroll if needed
@@ -266,6 +334,7 @@ func (m *Model) movePageDown() {
 	}
 
 	maxIndex := len(m.flattenTree()) - 1
+
 	m.selectedIndex += visibleHeight
 	if m.selectedIndex > maxIndex {
 		m.selectedIndex = maxIndex
@@ -322,6 +391,28 @@ func (m *Model) moveDiffPageDown() {
 	}
 }
 
+func (m Model) reloadCurrentDiffs() tea.Cmd {
+	if m.diffMode == BranchCompare {
+		return m.LoadCommitsAhead()
+	}
+	return m.LoadAllDiffs()
+}
+
+// moveDiffToTop scrolls the diff view to the top.
+func (m *Model) moveDiffToTop() {
+	m.diffScroll = 0
+}
+
+// moveDiffToBottom scrolls the diff view to the bottom.
+func (m *Model) moveDiffToBottom() {
+	totalLines := m.getDiffLineCount()
+	visibleHeight := m.height - 3
+	if visibleHeight < 1 {
+		visibleHeight = 1
+	}
+	m.diffScroll = max(0, totalLines-visibleHeight)
+}
+
 func max(a, b int) int {
 	if a > b {
 		return a
@@ -331,30 +422,47 @@ func max(a, b int) int {
 
 // getDiffLineCount returns the total number of lines in the current diff
 func (m *Model) getDiffLineCount() int {
-	flatTree := m.flattenTree()
-	if m.selectedIndex >= len(flatTree) {
-		return 0
+	filesToRender := m.getSelectedDiffFiles()
+	if len(filesToRender) == 0 {
+		if m.diffMode == BranchCompare {
+			return 3 // branch header + blank + message
+		}
+		return 1 // message
 	}
 
-	node := flatTree[m.selectedIndex]
-	if node.isDir {
-		return 0
+	lineCount := 0
+	if m.diffMode == BranchCompare {
+		lineCount += 2 // branch header + blank
 	}
 
-	for i := range m.diffFiles {
-		if m.diffFiles[i].Path == node.path {
-			count := 0
-			for _, hunk := range m.diffFiles[i].Hunks {
-				count += 2 + len(hunk.Lines) // 2 for hunk header (...)
-			}
-			return count
+	for fileIdx, selectedFile := range filesToRender {
+		if fileIdx > 0 {
+			lineCount += 2 // blank + separator
+		}
+
+		lineCount++ // file header
+		if len(selectedFile.Hunks) == 0 {
+			lineCount++ // empty-file message
+			continue
+		}
+
+		for _, hunk := range selectedFile.Hunks {
+			lineCount++ // hunk separator
+			lineCount += len(hunk.Lines)
 		}
 	}
-	return 0
+
+	return lineCount
 }
 
 // selectItem handles selection of current item
 func (m *Model) selectItem() tea.Cmd {
+	// In branch compare mode, files are already loaded; just keep current selection.
+	if m.diffMode == BranchCompare {
+		m.diffScroll = 0
+		return nil
+	}
+
 	flatTree := m.flattenTree()
 	if m.selectedIndex >= len(flatTree) {
 		return nil
@@ -371,6 +479,101 @@ func (m *Model) selectItem() tea.Cmd {
 		// Load diff for the file
 		return m.LoadDiff(node.path)
 	}
+}
+
+func (m *Model) jumpToNextHunk() {
+	hunkStarts := m.getCurrentHunkStartLines()
+	if len(hunkStarts) == 0 {
+		return
+	}
+
+	for _, start := range hunkStarts {
+		if start > m.diffScroll {
+			m.diffScroll = start
+			return
+		}
+	}
+
+	m.diffScroll = hunkStarts[len(hunkStarts)-1]
+}
+
+func (m *Model) jumpToPrevHunk() {
+	hunkStarts := m.getCurrentHunkStartLines()
+	if len(hunkStarts) == 0 {
+		return
+	}
+
+	for i := len(hunkStarts) - 1; i >= 0; i-- {
+		if hunkStarts[i] < m.diffScroll {
+			m.diffScroll = hunkStarts[i]
+			return
+		}
+	}
+
+	m.diffScroll = hunkStarts[0]
+}
+
+func (m Model) getCurrentHunkStartLines() []int {
+	filesToRender := m.getSelectedDiffFiles()
+	if len(filesToRender) == 0 {
+		return nil
+	}
+
+	lineNum := 0
+	if m.diffMode == BranchCompare {
+		lineNum += 2 // branch header + blank
+	}
+
+	var starts []int
+	for fileIdx, selectedFile := range filesToRender {
+		if fileIdx > 0 {
+			lineNum += 2 // blank + separator
+		}
+
+		lineNum++ // file header
+		if len(selectedFile.Hunks) == 0 {
+			lineNum++ // no-hunk message
+			continue
+		}
+
+		for _, hunk := range selectedFile.Hunks {
+			starts = append(starts, lineNum)
+			lineNum++ // hunk separator line
+			lineNum += len(hunk.Lines)
+		}
+	}
+
+	return starts
+}
+
+func (m Model) getSelectedDiffFiles() []*FileDiff {
+	flatTree := m.flattenTree()
+	if m.selectedIndex >= len(flatTree) {
+		return nil
+	}
+
+	node := flatTree[m.selectedIndex]
+	if node.isDir {
+		return nil
+	}
+
+	var filesToRender []*FileDiff
+	if m.diffMode == BranchCompare {
+		for i := range m.diffFiles {
+			if m.diffFiles[i].Path == node.path {
+				filesToRender = append(filesToRender, &m.diffFiles[i])
+			}
+		}
+		return filesToRender
+	}
+
+	for i := range m.diffFiles {
+		if m.diffFiles[i].Path == node.path {
+			filesToRender = append(filesToRender, &m.diffFiles[i])
+			break
+		}
+	}
+	return filesToRender
 }
 
 // toggleDirectory toggles directory expansion
@@ -585,8 +788,38 @@ func (m Model) checkForChanges() tea.Cmd {
 			return nil
 		}
 
-		// Compute a simple hash of the current state
+		// Compute a simple hash of the current state.
 		currentHash := computeFileHash(files)
+		if m.diffMode == BranchCompare {
+			stagedFiles, err := m.git.GetChangedFiles(Staged)
+			if err != nil {
+				if m.logger != nil {
+					m.logger.Error("Failed to check staged changes in branch compare", err, nil)
+				}
+				return nil
+			}
+
+			unstagedFiles, err := m.git.GetChangedFiles(Unstaged)
+			if err != nil {
+				if m.logger != nil {
+					m.logger.Error("Failed to check unstaged changes in branch compare", err, nil)
+				}
+				return nil
+			}
+
+			commits, err := m.git.GetCommitsAheadOfMain()
+			if err != nil {
+				if m.logger != nil {
+					m.logger.Error("Failed to check commits in branch compare", err, nil)
+				}
+				return nil
+			}
+
+			currentHash = computeFileHash(stagedFiles) + "|" + computeFileHash(unstagedFiles)
+			for _, c := range commits {
+				currentHash += "|" + c.Hash
+			}
+		}
 
 		if currentHash != m.lastFileHash {
 			// Files have changed, reload everything
@@ -617,6 +850,36 @@ func computeFileHash(files []FileDiff) string {
 	result := ""
 	for _, f := range files {
 		result += f.Path + string(rune(f.ChangeType))
+	}
+	return result
+}
+
+func aggregateBranchCompareFiles(diffFiles []FileDiff) []FileDiff {
+	byPath := make(map[string]FileDiff)
+	order := make([]string, 0, len(diffFiles))
+
+	for _, f := range diffFiles {
+		existing, ok := byPath[f.Path]
+		if !ok {
+			byPath[f.Path] = FileDiff{
+				Path:         f.Path,
+				ChangeType:   f.ChangeType,
+				LinesAdded:   f.LinesAdded,
+				LinesRemoved: f.LinesRemoved,
+			}
+			order = append(order, f.Path)
+			continue
+		}
+
+		existing.LinesAdded += f.LinesAdded
+		existing.LinesRemoved += f.LinesRemoved
+		existing.ChangeType = Modified
+		byPath[f.Path] = existing
+	}
+
+	result := make([]FileDiff, 0, len(order))
+	for _, path := range order {
+		result = append(result, byPath[path])
 	}
 	return result
 }

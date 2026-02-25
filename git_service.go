@@ -6,6 +6,8 @@ import (
 	"sort"
 
 	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/format/diff"
 	"github.com/go-git/go-git/v5/plumbing/format/index"
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
@@ -152,8 +154,13 @@ func (gs *GitService) GetChangedFiles(mode DiffMode) ([]FileDiff, error) {
 	return files, nil
 }
 
-// GetDiff gets the git diff based on mode
+// GetDiff gets the git diff based on mode with default context.
 func (gs *GitService) GetDiff(mode DiffMode, viewMode DiffViewMode, logger *Logger) ([]FileDiff, error) {
+	return gs.GetDiffWithContext(mode, viewMode, DefaultDiffContext, logger)
+}
+
+// GetDiffWithContext gets the git diff based on mode and configurable context lines.
+func (gs *GitService) GetDiffWithContext(mode DiffMode, viewMode DiffViewMode, contextLines int, logger *Logger) ([]FileDiff, error) {
 	worktree, err := gs.repo.Worktree()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get worktree: %w", err)
@@ -213,7 +220,7 @@ func (gs *GitService) GetDiff(mode DiffMode, viewMode DiffViewMode, logger *Logg
 			continue
 		}
 
-		fileDiff, err := gs.getFileDiff(worktree, idx, headCommit, path, mode, *fileStatus, logger)
+		fileDiff, err := gs.getFileDiff(worktree, idx, headCommit, path, mode, viewMode, contextLines, *fileStatus, logger)
 		if err != nil {
 			// Log error but continue with other files
 			if logger != nil {
@@ -234,7 +241,7 @@ func (gs *GitService) GetDiff(mode DiffMode, viewMode DiffViewMode, logger *Logg
 }
 
 // getFileDiff generates a FileDiff for a single file
-func (gs *GitService) getFileDiff(worktree *git.Worktree, idx *index.Index, headCommit *object.Commit, path string, mode DiffMode, fileStatus git.FileStatus, logger *Logger) (*FileDiff, error) {
+func (gs *GitService) getFileDiff(worktree *git.Worktree, idx *index.Index, headCommit *object.Commit, path string, mode DiffMode, viewMode DiffViewMode, contextLines int, fileStatus git.FileStatus, logger *Logger) (*FileDiff, error) {
 	var oldContent, newContent []byte
 	var changeType ChangeType
 
@@ -407,7 +414,12 @@ func (gs *GitService) getFileDiff(worktree *git.Worktree, idx *index.Index, head
 	oldLines := splitLines(string(oldContent))
 	newLines := splitLines(string(newContent))
 
-	hunks, err := computeHunks(oldLines, newLines)
+	effectiveContext := contextLines
+	if viewMode == WholeFile {
+		effectiveContext = WholeFileContext
+	}
+
+	hunks, err := computeHunksWithContext(oldLines, newLines, effectiveContext)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compute diff for %s: %w", path, err)
 	}
@@ -429,29 +441,23 @@ func (gs *GitService) getFileDiff(worktree *git.Worktree, idx *index.Index, head
 
 // GetDefaultBranch returns the default branch name (main or master)
 func (gs *GitService) GetDefaultBranch() (string, error) {
-	// Try to get the default branch from refs
-	refs, err := gs.repo.References()
-	if err != nil {
-		return "", fmt.Errorf("failed to get references: %w", err)
-	}
-
 	// Check for common default branch names
 	defaultBranches := []string{"refs/heads/main", "refs/heads/master", "refs/heads/develop"}
 
 	for _, refName := range defaultBranches {
-		ref, err := gs.repo.Reference(refName, false)
+		ref, err := gs.repo.Reference(plumbing.ReferenceName(refName), false)
 		if err == nil && ref != nil {
 			return ref.Name().Short(), nil
 		}
 	}
 
 	// Fallback to checking origin
-	originMain, err := gs.repo.Reference("refs/remotes/origin/main", false)
+	originMain, err := gs.repo.Reference(plumbing.ReferenceName("refs/remotes/origin/main"), false)
 	if err == nil && originMain != nil {
 		return "main", nil
 	}
 
-	originMaster, err := gs.repo.Reference("refs/remotes/origin/master", false)
+	originMaster, err := gs.repo.Reference(plumbing.ReferenceName("refs/remotes/origin/master"), false)
 	if err == nil && originMaster != nil {
 		return "master", nil
 	}
@@ -478,16 +484,16 @@ func (gs *GitService) GetCommitsAheadOfMain() ([]Commit, error) {
 	}
 
 	// Get current branch reference
-	currentRef, err := gs.repo.Reference("refs/heads/"+currentBranch, true)
+	currentRef, err := gs.repo.Reference(plumbing.ReferenceName("refs/heads/"+currentBranch), true)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get current branch reference: %w", err)
 	}
 
 	// Get default branch reference
-	defaultRef, err := gs.repo.Reference("refs/heads/"+defaultBranch, true)
+	defaultRef, err := gs.repo.Reference(plumbing.ReferenceName("refs/heads/"+defaultBranch), true)
 	if err != nil {
 		// Default branch might not exist locally, try to get from HEAD
-		defaultRef, err = gs.repo.Reference("refs/remotes/origin/"+defaultBranch, true)
+		defaultRef, err = gs.repo.Reference(plumbing.ReferenceName("refs/remotes/origin/"+defaultBranch), true)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get default branch reference: %w", err)
 		}
@@ -607,19 +613,217 @@ func getFirstLine(message string) string {
 	return message
 }
 
-// GetBranchCompareDiffs gets both staged and unstaged changes for branch comparison
-func (gs *GitService) GetBranchCompareDiffs(logger *Logger) ([]FileDiff, []FileDiff, error) {
+// GetBranchCompareDiffs gets both staged and unstaged changes for branch comparison.
+func (gs *GitService) GetBranchCompareDiffs(viewMode DiffViewMode, contextLines int, logger *Logger) ([]FileDiff, []FileDiff, error) {
 	// Get staged changes
-	staged, err := gs.GetDiff(Staged, DiffOnly, logger)
+	staged, err := gs.GetDiffWithContext(Staged, viewMode, contextLines, logger)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get staged changes: %w", err)
 	}
 
 	// Get unstaged changes
-	unstaged, err := gs.GetDiff(Unstaged, DiffOnly, logger)
+	unstaged, err := gs.GetDiffWithContext(Unstaged, viewMode, contextLines, logger)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get unstaged changes: %w", err)
 	}
 
 	return staged, unstaged, nil
+}
+
+// GetCommitDiff gets the diff for a specific commit (compares commit to its parent)
+func (gs *GitService) GetCommitDiff(commitHash string, logger *Logger) ([]FileDiff, error) {
+	// Get the commit object
+	hash := plumbing.NewHash(commitHash)
+	commit, err := gs.repo.CommitObject(hash)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get commit: %w", err)
+	}
+
+	// Get parent commit
+	var parentCommit *object.Commit
+	if len(commit.ParentHashes) > 0 {
+		parentCommit, err = gs.repo.CommitObject(commit.ParentHashes[0])
+		if err != nil {
+			return nil, fmt.Errorf("failed to get parent commit: %w", err)
+		}
+	} else {
+		// This is the first commit (no parent), return empty
+		return []FileDiff{}, nil
+	}
+
+	// Get the patch as a string for debugging
+	patch, err := parentCommit.Patch(commit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get patch: %w", err)
+	}
+
+	if logger != nil {
+		logger.Info("Got patch from git", map[string]interface{}{
+			"commit":       commitHash[:7],
+			"file_patches": len(patch.FilePatches()),
+		})
+	}
+
+	// Convert patch to FileDiffs
+	var files []FileDiff
+	for _, filePatch := range patch.FilePatches() {
+		from, to := filePatch.Files()
+		path := "unknown"
+		changeType := Modified
+
+		if from != nil {
+			path = from.Path()
+		}
+		if to != nil {
+			path = to.Path()
+		}
+
+		// Generate hunks from patch
+		hunks, err := convertPatchToHunks(filePatch)
+		if err != nil {
+			if logger != nil {
+				logger.Warn("Failed to convert patch to hunks", map[string]interface{}{
+					"file":  path,
+					"error": err,
+				})
+			}
+			continue
+		}
+
+		// Skip files with no hunks (no actual changes)
+		if len(hunks) == 0 {
+			continue
+		}
+
+		// Count lines
+		linesAdded := 0
+		linesRemoved := 0
+		for _, hunk := range hunks {
+			for _, line := range hunk.Lines {
+				if line.Type == LineAdded {
+					linesAdded++
+				} else if line.Type == LineRemoved {
+					linesRemoved++
+				}
+			}
+		}
+
+		if logger != nil {
+			logger.Info("Processed file patch", map[string]interface{}{
+				"path":          path,
+				"hunks":         len(hunks),
+				"lines_added":   linesAdded,
+				"lines_removed": linesRemoved,
+			})
+		}
+
+		files = append(files, FileDiff{
+			Path:         path,
+			ChangeType:   changeType,
+			Hunks:        hunks,
+			LinesAdded:   linesAdded,
+			LinesRemoved: linesRemoved,
+		})
+	}
+
+	if logger != nil {
+		logger.Info("Loaded commit diff", map[string]interface{}{
+			"commit":     commitHash[:7],
+			"file_count": len(files),
+		})
+	}
+
+	return files, nil
+}
+
+// convertPatchToHunks converts a git Patch to our Hunk format
+func convertPatchToHunks(filePatch diff.FilePatch) ([]Hunk, error) {
+	// Get all chunks from the file patch
+	chunks := filePatch.Chunks()
+
+	// Debug: Log chunk count
+	// fmt.Fprintf(os.Stderr, "DEBUG: FilePatch has %d chunks\n", len(chunks))
+
+	// If no chunks, return empty
+	if len(chunks) == 0 {
+		return []Hunk{}, nil
+	}
+
+	var hunks []Hunk
+
+	// Process each chunk
+	for _, chunk := range chunks {
+		// Get the content of this chunk
+		content := chunk.Content()
+
+		if content == "" {
+			continue
+		}
+
+		// Split content into lines
+		lines := splitLines(content)
+
+		var currentHunk *Hunk
+		for _, line := range lines {
+			// Skip empty lines
+			if len(line) == 0 {
+				continue
+			}
+
+			// Check for hunk header (@@ -oldStart,oldCount +newStart,newCount @@)
+			if len(line) > 2 && line[0] == '@' && line[1] == '@' {
+				// Save previous hunk if exists
+				if currentHunk != nil && len(currentHunk.Lines) > 0 {
+					hunks = append(hunks, *currentHunk)
+				}
+				// Start new hunk
+				currentHunk = &Hunk{
+					Lines: []DiffLine{},
+				}
+				continue
+			}
+
+			// Parse diff lines
+			var lineType LineType
+			var contentStr string
+
+			switch line[0] {
+			case '+':
+				lineType = LineAdded
+				contentStr = line[1:]
+			case '-':
+				lineType = LineRemoved
+				contentStr = line[1:]
+			case ' ':
+				lineType = LineContext
+				contentStr = line[1:]
+			default:
+				// Skip any other lines (like file paths, etc.)
+				continue
+			}
+
+			// Create hunk if needed
+			if currentHunk == nil {
+				currentHunk = &Hunk{
+					Lines: []DiffLine{},
+				}
+			}
+
+			currentHunk.Lines = append(currentHunk.Lines, DiffLine{
+				Type:    lineType,
+				Content: contentStr,
+				LineNum: 0,
+			})
+		}
+
+		// Save last hunk from this chunk
+		if currentHunk != nil && len(currentHunk.Lines) > 0 {
+			hunks = append(hunks, *currentHunk)
+		}
+	}
+
+	// Debug: Log result
+	// fmt.Fprintf(os.Stderr, "DEBUG: Converted to %d hunks\n", len(hunks))
+
+	return hunks, nil
 }
