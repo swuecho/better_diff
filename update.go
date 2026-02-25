@@ -228,7 +228,15 @@ func (m *Model) moveUp() {
 
 // moveDown moves the selection down
 func (m *Model) moveDown() {
-	if m.selectedIndex < len(m.flattenTree())-1 {
+	// In branch compare mode, use commits count
+	var maxIndex int
+	if m.diffMode == BranchCompare {
+		maxIndex = len(m.commits) - 1
+	} else {
+		maxIndex = len(m.flattenTree()) - 1
+	}
+
+	if m.selectedIndex < maxIndex {
 		m.selectedIndex++
 
 		// Auto scroll if needed
@@ -265,7 +273,14 @@ func (m *Model) movePageDown() {
 		visibleHeight = 1
 	}
 
-	maxIndex := len(m.flattenTree()) - 1
+	// In branch compare mode, use commits count
+	var maxIndex int
+	if m.diffMode == BranchCompare {
+		maxIndex = len(m.commits) - 1
+	} else {
+		maxIndex = len(m.flattenTree()) - 1
+	}
+
 	m.selectedIndex += visibleHeight
 	if m.selectedIndex > maxIndex {
 		m.selectedIndex = maxIndex
@@ -331,6 +346,11 @@ func max(a, b int) int {
 
 // getDiffLineCount returns the total number of lines in the current diff
 func (m *Model) getDiffLineCount() int {
+	// In branch compare mode, no file is selected from tree
+	if m.diffMode == BranchCompare {
+		return 0
+	}
+
 	flatTree := m.flattenTree()
 	if m.selectedIndex >= len(flatTree) {
 		return 0
@@ -355,6 +375,11 @@ func (m *Model) getDiffLineCount() int {
 
 // selectItem handles selection of current item
 func (m *Model) selectItem() tea.Cmd {
+	// In branch compare mode, commits are displayed but not selectable
+	if m.diffMode == BranchCompare {
+		return nil
+	}
+
 	flatTree := m.flattenTree()
 	if m.selectedIndex >= len(flatTree) {
 		return nil

@@ -6,6 +6,7 @@ import (
 	"sort"
 
 	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/format/index"
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
@@ -429,29 +430,23 @@ func (gs *GitService) getFileDiff(worktree *git.Worktree, idx *index.Index, head
 
 // GetDefaultBranch returns the default branch name (main or master)
 func (gs *GitService) GetDefaultBranch() (string, error) {
-	// Try to get the default branch from refs
-	refs, err := gs.repo.References()
-	if err != nil {
-		return "", fmt.Errorf("failed to get references: %w", err)
-	}
-
 	// Check for common default branch names
 	defaultBranches := []string{"refs/heads/main", "refs/heads/master", "refs/heads/develop"}
 
 	for _, refName := range defaultBranches {
-		ref, err := gs.repo.Reference(refName, false)
+		ref, err := gs.repo.Reference(plumbing.ReferenceName(refName), false)
 		if err == nil && ref != nil {
 			return ref.Name().Short(), nil
 		}
 	}
 
 	// Fallback to checking origin
-	originMain, err := gs.repo.Reference("refs/remotes/origin/main", false)
+	originMain, err := gs.repo.Reference(plumbing.ReferenceName("refs/remotes/origin/main"), false)
 	if err == nil && originMain != nil {
 		return "main", nil
 	}
 
-	originMaster, err := gs.repo.Reference("refs/remotes/origin/master", false)
+	originMaster, err := gs.repo.Reference(plumbing.ReferenceName("refs/remotes/origin/master"), false)
 	if err == nil && originMaster != nil {
 		return "master", nil
 	}
@@ -478,16 +473,16 @@ func (gs *GitService) GetCommitsAheadOfMain() ([]Commit, error) {
 	}
 
 	// Get current branch reference
-	currentRef, err := gs.repo.Reference("refs/heads/"+currentBranch, true)
+	currentRef, err := gs.repo.Reference(plumbing.ReferenceName("refs/heads/"+currentBranch), true)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get current branch reference: %w", err)
 	}
 
 	// Get default branch reference
-	defaultRef, err := gs.repo.Reference("refs/heads/"+defaultBranch, true)
+	defaultRef, err := gs.repo.Reference(plumbing.ReferenceName("refs/heads/"+defaultBranch), true)
 	if err != nil {
 		// Default branch might not exist locally, try to get from HEAD
-		defaultRef, err = gs.repo.Reference("refs/remotes/origin/"+defaultBranch, true)
+		defaultRef, err = gs.repo.Reference(plumbing.ReferenceName("refs/remotes/origin/"+defaultBranch), true)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get default branch reference: %w", err)
 		}

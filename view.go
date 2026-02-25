@@ -223,7 +223,6 @@ func (m Model) renderFileTree(width, height int) string {
 			}
 			line += statsStyle.Render(stats)
 		}
-		}
 
 		if isSelected && m.panel == FileTreePanel {
 			line = selectedStyle.Render(line)
@@ -407,7 +406,7 @@ func (m Model) renderFooter() string {
 		keyStyle.Render("[PgUp/PgDn]") + " Page",
 		keyStyle.Render("[Enter]") + " Select/Expand",
 		keyStyle.Render("[Tab]") + " Switch Panel",
-		keyStyle.Render("[s]") + " Staged/Unstaged",
+		keyStyle.Render("[s]") + " Staged/Unstaged/Branch",
 		keyStyle.Render("[f]") + " Diff/Whole File",
 		keyStyle.Render("[q]") + " Quit",
 	}
@@ -434,4 +433,125 @@ func min(a, b int) int {
 // renderHelpModal renders the help modal overlay
 func (m Model) renderHelpModal() string {
 	return m.renderHelp()
+}
+
+// renderCommits renders the list of commits for branch comparison
+func (m Model) renderCommits(width, height int) string {
+	selectedStyle := lipgloss.NewStyle().
+		Background(lipgloss.Color("235")).
+		Width(width - 2)
+
+	// Calculate internal content height
+	internalHeight := height - 2
+	if internalHeight < 0 {
+		internalHeight = 0
+	}
+
+	// If no commits ahead, show changes summary
+	if len(m.commits) == 0 {
+		infoStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("243")).
+			Italic(true)
+
+		var lines []string
+		lines = append(lines, infoStyle.Render("No commits ahead of main"))
+
+		// Show staged/unstaged file count if available
+		if len(m.diffFiles) > 0 {
+			stagedCount := 0
+			unstagedCount := 0
+
+			// Count files by checking their status
+			for _, f := range m.diffFiles {
+				if f.ChangeType == Added {
+					unstagedCount++
+				} else {
+					stagedCount++
+				}
+			}
+
+			lines = append(lines, "")
+			lines = append(lines, infoStyle.Render(fmt.Sprintf("Changes: %d files", len(m.diffFiles))))
+		}
+
+		content := strings.Join(lines, "\n")
+
+		panelStyle := lipgloss.NewStyle().
+			Width(width).
+			Height(height).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("237")).
+			MaxWidth(width).
+			MaxHeight(height)
+
+		if m.panel == FileTreePanel {
+			panelStyle = panelStyle.BorderForeground(lipgloss.Color("blue"))
+		}
+
+		return panelStyle.Render(content)
+	}
+
+	// Get visible commits
+	start := m.scrollOffset
+	end := min(start+internalHeight, len(m.commits))
+	if start > len(m.commits) {
+		start = len(m.commits)
+	}
+	if end > len(m.commits) {
+		end = len(m.commits)
+	}
+	visibleCommits := m.commits[start:end]
+
+	// Render each commit
+	var lines []string
+	for i, commit := range visibleCommits {
+		globalIndex := start + i
+		isSelected := globalIndex == m.selectedIndex
+
+		// Build commit line
+		commitStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("86")). // Green for hash
+			Bold(true)
+
+		authorStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("147")) // Light blue for author
+
+		dateStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("245")) // Gray for date
+
+		messageStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("223")) // Light yellow for message
+
+		line := commitStyle.Render(commit.ShortHash) + " " +
+			authorStyle.Render(commit.Author) + " " +
+			dateStyle.Render(commit.Date) + "\n" +
+			"    " + messageStyle.Render(commit.Message)
+
+		if isSelected && m.panel == FileTreePanel {
+			line = selectedStyle.Render(commit.ShortHash+" "+commit.Author+" "+commit.Date)
+			lines = append(lines, line)
+			// Add message on next line
+			lines = append(lines, "    "+messageStyle.Render(commit.Message))
+		} else {
+			lines = append(lines, line)
+		}
+	}
+
+	// Build content as a single string
+	content := strings.Join(lines, "\n")
+
+	// Apply panel styling with border
+	panelStyle := lipgloss.NewStyle().
+		Width(width).
+		Height(height).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("237")).
+		MaxWidth(width).
+		MaxHeight(height)
+
+	if m.panel == FileTreePanel {
+		panelStyle = panelStyle.BorderForeground(lipgloss.Color("blue"))
+	}
+
+	return panelStyle.Render(content)
 }
