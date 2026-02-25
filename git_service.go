@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -605,6 +606,205 @@ func (gs *GitService) GetBranchCompareDiffs(viewMode DiffViewMode, contextLines 
 	}
 
 	return staged, unstaged, nil
+}
+
+// GetUnifiedBranchCompareDiff returns a single unified diff per file:
+// default branch tip (main/master) vs current working tree state.
+func (gs *GitService) GetUnifiedBranchCompareDiff(viewMode DiffViewMode, contextLines int, logger *Logger) ([]FileDiff, error) {
+	worktree, err := gs.repo.Worktree()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get worktree: %w", err)
+	}
+
+	headRef, err := gs.repo.Head()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get HEAD: %w", err)
+	}
+	headCommit, err := gs.repo.CommitObject(headRef.Hash())
+	if err != nil {
+		return nil, fmt.Errorf("failed to get HEAD commit: %w", err)
+	}
+
+	baseCommit, err := gs.getDefaultBranchCommit()
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve default branch commit: %w", err)
+	}
+
+	paths, err := gs.collectBranchComparePaths(baseCommit, headCommit, worktree)
+	if err != nil {
+		return nil, err
+	}
+
+	effectiveContext := contextLines
+	if viewMode == WholeFile {
+		effectiveContext = WholeFileContext
+	}
+
+	files := make([]FileDiff, 0, len(paths))
+	for _, path := range paths {
+		oldContent, oldExists, err := gs.readFileFromCommit(baseCommit, path, logger)
+		if err != nil {
+			return nil, err
+		}
+		newContent, newExists, err := gs.readFileFromWorktree(worktree, path, logger)
+		if err != nil {
+			return nil, err
+		}
+
+		if !oldExists && !newExists {
+			continue
+		}
+
+		hunks, err := computeHunksWithContext(splitLines(string(oldContent)), splitLines(string(newContent)), effectiveContext)
+		if err != nil {
+			return nil, fmt.Errorf("failed to compute unified diff for %s: %w", path, err)
+		}
+		if len(hunks) == 0 {
+			continue
+		}
+
+		changeType := Modified
+		if !oldExists && newExists {
+			changeType = Added
+		} else if oldExists && !newExists {
+			changeType = Deleted
+		}
+
+		linesAdded := 0
+		linesRemoved := 0
+		for _, hunk := range hunks {
+			for _, line := range hunk.Lines {
+				if line.Type == LineAdded {
+					linesAdded++
+				} else if line.Type == LineRemoved {
+					linesRemoved++
+				}
+			}
+		}
+
+		files = append(files, FileDiff{
+			Path:         path,
+			ChangeType:   changeType,
+			Hunks:        hunks,
+			LinesAdded:   linesAdded,
+			LinesRemoved: linesRemoved,
+		})
+	}
+
+	return files, nil
+}
+
+func (gs *GitService) getDefaultBranchCommit() (*object.Commit, error) {
+	defaultBranch, err := gs.GetDefaultBranch()
+	if err != nil {
+		return nil, err
+	}
+
+	ref, err := gs.repo.Reference(plumbing.ReferenceName("refs/heads/"+defaultBranch), true)
+	if err != nil {
+		ref, err = gs.repo.Reference(plumbing.ReferenceName("refs/remotes/origin/"+defaultBranch), true)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get default branch reference: %w", err)
+		}
+	}
+
+	commit, err := gs.repo.CommitObject(ref.Hash())
+	if err != nil {
+		return nil, fmt.Errorf("failed to get default branch commit: %w", err)
+	}
+	return commit, nil
+}
+
+func (gs *GitService) collectBranchComparePaths(baseCommit, headCommit *object.Commit, worktree *git.Worktree) ([]string, error) {
+	pathSet := make(map[string]struct{})
+
+	patch, err := baseCommit.Patch(headCommit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compute base..HEAD patch: %w", err)
+	}
+	for _, filePatch := range patch.FilePatches() {
+		from, to := filePatch.Files()
+		if from != nil && from.Path() != "" {
+			pathSet[from.Path()] = struct{}{}
+		}
+		if to != nil && to.Path() != "" {
+			pathSet[to.Path()] = struct{}{}
+		}
+	}
+
+	status, err := worktree.Status()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get worktree status: %w", err)
+	}
+	for path, fileStatus := range status {
+		if fileStatus.Staging != git.Unmodified || fileStatus.Worktree != git.Unmodified || status.IsUntracked(path) {
+			pathSet[path] = struct{}{}
+		}
+	}
+
+	paths := make([]string, 0, len(pathSet))
+	for path := range pathSet {
+		paths = append(paths, path)
+	}
+	sortStrings(paths)
+	return paths, nil
+}
+
+func (gs *GitService) readFileFromCommit(commit *object.Commit, path string, logger *Logger) ([]byte, bool, error) {
+	file, err := commit.File(path)
+	if err != nil {
+		if errors.Is(err, object.ErrFileNotFound) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("failed to get file %s from base commit: %w", path, err)
+	}
+
+	reader, err := file.Reader()
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to open file %s from base commit: %w", path, err)
+	}
+	content, err := readAll(reader)
+	reader.Close()
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to read file %s from base commit: %w", path, err)
+	}
+	if len(content) > MaxFileSize {
+		if logger != nil {
+			logger.Warn("Base file too large to diff", map[string]interface{}{
+				"file": path,
+				"size": len(content),
+				"max":  MaxFileSize,
+			})
+		}
+		return nil, false, fmt.Errorf("file %s too large to diff (%d > %d)", path, len(content), MaxFileSize)
+	}
+	return content, true, nil
+}
+
+func (gs *GitService) readFileFromWorktree(worktree *git.Worktree, path string, logger *Logger) ([]byte, bool, error) {
+	file, err := worktree.Filesystem.Open(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("failed to open file %s from worktree: %w", path, err)
+	}
+	content, err := readAll(file)
+	file.Close()
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to read file %s from worktree: %w", path, err)
+	}
+	if len(content) > MaxFileSize {
+		if logger != nil {
+			logger.Warn("Worktree file too large to diff", map[string]interface{}{
+				"file": path,
+				"size": len(content),
+				"max":  MaxFileSize,
+			})
+		}
+		return nil, false, fmt.Errorf("file %s too large to diff (%d > %d)", path, len(content), MaxFileSize)
+	}
+	return content, true, nil
 }
 
 // GetCommitDiff gets the diff for a specific commit (compares commit to its parent)

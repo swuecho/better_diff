@@ -798,18 +798,15 @@ func (m Model) checkForChanges() tea.Cmd {
 				return nil
 			}
 
-			stagedDiffs, unstagedDiffs, err := m.git.GetBranchCompareDiffs(m.diffViewMode, m.diffContext, m.logger)
+			unifiedDiffs, err := m.git.GetUnifiedBranchCompareDiff(m.diffViewMode, m.diffContext, m.logger)
 			if err != nil {
 				if m.logger != nil {
-					m.logger.Error("Failed to check staged/unstaged diffs in branch compare", err, nil)
+					m.logger.Error("Failed to check unified branch compare diff", err, nil)
 				}
 				return nil
 			}
 
-			combined := make([]FileDiff, 0, len(stagedDiffs)+len(unstagedDiffs))
-			combined = append(combined, stagedDiffs...)
-			combined = append(combined, unstagedDiffs...)
-			currentHash := computeDiffHash(combined)
+			currentHash := computeDiffHash(unifiedDiffs)
 			for _, c := range commits {
 				currentHash += "|" + c.Hash
 			}
