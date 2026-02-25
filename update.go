@@ -1,8 +1,6 @@
 package main
 
 import (
-	"time"
-
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -75,9 +73,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "s":
-			// Toggle between staged and unstaged
+			// Toggle between staged, unstaged, and branch compare
 			if m.diffMode == Unstaged {
 				m.diffMode = Staged
+			} else if m.diffMode == Staged {
+				m.diffMode = BranchCompare
 			} else {
 				m.diffMode = Unstaged
 			}
@@ -86,6 +86,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.diffScroll = 0
 			m.diffFiles = nil
 			m.files = nil // Clear to force reload
+			m.commits = nil // Clear commits
+
+			if m.diffMode == BranchCompare {
+				return m, m.LoadCommitsAhead()
+			}
 			return m, m.LoadFiles()
 
 		case "f":
@@ -113,18 +118,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		return m, tea.Tick(time.Second*2, func(t time.Time) tea.Msg {
-			return TickMsg{time: t.Second()}
-		})
-
-	case TickMsg:
-		// Periodically check for changes
-		return m, m.checkForChanges()
+		return m, nil
 
 	case gitInfoMsg:
 		m.rootPath = msg.rootPath
 		m.branch = msg.branch
-		return m, nil
+		// Create and start file system watcher
+		watcher, err := NewWatcher(m.rootPath)
+		if err != nil {
+			if m.logger != nil {
+				m.logger.Warn("Failed to create file watcher", map[string]interface{}{"error": err})
+			}
+			return m, nil
+		}
+		m.watcher = watcher
+		// Start watching for changes
+		return m, watcher.WaitForChange()
+
+	case FSChangeMsg:
+		// File system changed, check for actual changes
+		cmd := m.checkForChanges()
+		// Always continue watching after checking
+		if m.watcher != nil {
+			return m, tea.Batch(cmd, m.watcher.WaitForChange())
+		}
+		return m, cmd
 
 	case filesLoadedMsg:
 		m.files = msg.files
@@ -136,19 +154,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.diffFiles = msg.files
 		return m, nil
 
+	case commitsLoadedMsg:
+		m.commits = msg.commits
+		// Also load both staged and unstaged diffs for branch compare mode
+		if m.diffMode == BranchCompare {
+			// Load both staged and unstaged changes
+			return m, m.LoadAllDiffs()
+		}
+		return m, nil
+
 	case filesChangedMsg:
 		// Files have changed, reload everything
 		m.files = msg.files
 		m.lastFileHash = msg.hash
 		m.buildFileTree()
 		m.diffFiles = nil // Clear old diffs
-		// Reload diffs
-		return m, tea.Batch(
-			m.LoadAllDiffs(),
-			tea.Tick(time.Second*2, func(t time.Time) tea.Msg {
-				return TickMsg{time: t.Second()}
-			}),
-		)
+		// Reload diffs and continue watching
+		cmd := m.LoadAllDiffs()
+		if m.watcher != nil {
+			return m, tea.Batch(cmd, m.watcher.WaitForChange())
+		}
+		return m, cmd
 
 	case diffLoadedMsg:
 		// Only add if the file has actual content (not empty)
@@ -434,7 +460,7 @@ func buildTreeNodes(dir *dirNode, depth int) []TreeNode {
 			name:         subdir.name,
 			path:         subdir.path,
 			isDir:        true,
-			isExpanded:   false,
+			isExpanded:   true,
 			children:     childNodes,
 			changeType:   getDirChangeType(subdir),
 			linesAdded:   totalAdded,
@@ -543,7 +569,8 @@ func getFileName(path string) string {
 func (m Model) checkForChanges() tea.Cmd {
 	return func() tea.Msg {
 		if m.git == nil {
-			return TickMsg{time: 0}
+			// No git service, can't check
+			return nil
 		}
 
 		// Get current files and compute a hash
@@ -554,7 +581,8 @@ func (m Model) checkForChanges() tea.Cmd {
 					"mode": m.diffMode,
 				})
 			}
-			return errMsg{err}
+			// Continue watching despite error
+			return nil
 		}
 
 		// Compute a simple hash of the current state
@@ -575,8 +603,8 @@ func (m Model) checkForChanges() tea.Cmd {
 			}
 		}
 
-		// No changes, just continue ticking
-		return TickMsg{time: 0}
+		// No changes
+		return nil
 	}
 }
 

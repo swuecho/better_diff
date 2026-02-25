@@ -15,8 +15,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Initialize logger (can be made configurable)
-	logger := NewLogger(INFO)
+	// Get git root path for logger fallback
+	gitRootPath, _ := gitService.GetRootPath()
+
+	// Initialize logger (tries /tmp first, then repo parent dir)
+	logger, err := NewLogger(INFO, gitRootPath)
+	if err != nil {
+		// Log the error but continue - logger will fall back to stderr
+		fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
+	}
+	defer logger.Close()
+
 	logger.Info("better_diff starting", map[string]interface{}{
 		"version": "1.0.0",
 	})

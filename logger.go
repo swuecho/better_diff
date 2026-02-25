@@ -57,6 +57,8 @@ type Logger struct {
 	output   io.Writer
 	quiet    bool
 	stats    *ErrorStats
+	file     *os.File
+	isFile   bool
 }
 
 // ErrorStats tracks error statistics
@@ -70,12 +72,39 @@ type ErrorStats struct {
 }
 
 // NewLogger creates a new logger with the specified level
-func NewLogger(level LogLevel) *Logger {
-	return &Logger{
+// Tries to write to /tmp/better_diff.log first, then falls back to repo parent dir
+// If both fail, uses stderr and returns an error
+func NewLogger(level LogLevel, gitRootPath string) (*Logger, error) {
+	logger := &Logger{
 		level:  level,
 		output: os.Stderr,
 		stats:  &ErrorStats{ByType: make(map[string]int)},
+		isFile: false,
 	}
+
+	// Try /tmp first
+	logFilePath := "/tmp/better_diff.log"
+	file, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		// Fall back to git repo parent directory
+		if gitRootPath != "" {
+			logFilePath = gitRootPath + "/better_diff.log"
+			file, err = os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+			if err == nil {
+				logger.output = file
+				logger.file = file
+				logger.isFile = true
+				return logger, nil
+			}
+		}
+		// If both fail, return logger with stderr but also return error
+		return logger, fmt.Errorf("failed to open log file (tried /tmp and %s): %w", logFilePath, err)
+	}
+
+	logger.output = file
+	logger.file = file
+	logger.isFile = true
+	return logger, nil
 }
 
 // SetOutput sets the output destination for log messages
@@ -150,10 +179,7 @@ func (l *Logger) log(level LogLevel, msg string, err error, fields map[string]in
 
 	// Build log message
 	timestamp := time.Now().Format("2006-01-02 15:04:05")
-	color := level.Color()
-	reset := "\033[0m"
-
-	message := fmt.Sprintf("%s [%s%s%s] %s", timestamp, color, level.String(), reset, msg)
+	message := fmt.Sprintf("%s [%s] %s", timestamp, level.String(), msg)
 
 	// Add error if present
 	if err != nil {
@@ -257,4 +283,15 @@ func copyMap(m map[string]int) map[string]int {
 		result[k] = v
 	}
 	return result
+}
+
+// Close closes the log file if one is open
+func (l *Logger) Close() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.file != nil {
+		return l.file.Close()
+	}
+	return nil
 }

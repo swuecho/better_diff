@@ -1,8 +1,6 @@
 package main
 
 import (
-	"time"
-
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -18,9 +16,11 @@ const (
 type Model struct {
 	git           *GitService // Git service (dependency injection)
 	logger        *Logger     // Logger for error tracking
+	watcher       *Watcher    // File system watcher
 	files         []FileDiff
 	diffFiles     []FileDiff // Files with full diff content
 	fileTree      []TreeNode
+	commits       []Commit   // Commits ahead of main branch
 	selectedIndex int
 	panel         Panel
 	diffMode      DiffMode
@@ -69,9 +69,6 @@ func (m Model) Init() tea.Cmd {
 		m.LoadGitInfo(),
 		m.LoadFiles(),
 		m.LoadAllDiffs(),
-		tea.Tick(time.Second*2, func(t time.Time) tea.Msg {
-			return TickMsg{time: t.Second()}
-		}),
 	)
 }
 
@@ -167,6 +164,24 @@ func (m Model) LoadAllDiffs() tea.Cmd {
 	}
 }
 
+// LoadCommitsAhead loads commits ahead of main branch
+func (m Model) LoadCommitsAhead() tea.Cmd {
+	return func() tea.Msg {
+		if m.git == nil {
+			return errMsg{&ServiceError{Message: "Git service not initialized"}}
+		}
+
+		commits, err := m.git.GetCommitsAheadOfMain()
+		if err != nil {
+			if m.logger != nil {
+				m.logger.Error("Failed to get commits ahead", err, nil)
+			}
+			return errMsg{err}
+		}
+		return commitsLoadedMsg{commits}
+	}
+}
+
 // ServiceError represents an error from a service not being initialized
 type ServiceError struct {
 	Message string
@@ -195,6 +210,10 @@ type allDiffsLoadedMsg struct {
 	files []FileDiff
 }
 
+type commitsLoadedMsg struct {
+	commits []Commit
+}
+
 type errMsg struct {
 	err error
 }
@@ -205,9 +224,4 @@ type clearErrorMsg struct{}
 type filesChangedMsg struct {
 	files []FileDiff
 	hash  string
-}
-
-// TickMsg is for periodic updates
-type TickMsg struct {
-	time int
 }

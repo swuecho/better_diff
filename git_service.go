@@ -426,3 +426,200 @@ func (gs *GitService) getFileDiff(worktree *git.Worktree, idx *index.Index, head
 
 	return fileDiff, nil
 }
+
+// GetDefaultBranch returns the default branch name (main or master)
+func (gs *GitService) GetDefaultBranch() (string, error) {
+	// Try to get the default branch from refs
+	refs, err := gs.repo.References()
+	if err != nil {
+		return "", fmt.Errorf("failed to get references: %w", err)
+	}
+
+	// Check for common default branch names
+	defaultBranches := []string{"refs/heads/main", "refs/heads/master", "refs/heads/develop"}
+
+	for _, refName := range defaultBranches {
+		ref, err := gs.repo.Reference(refName, false)
+		if err == nil && ref != nil {
+			return ref.Name().Short(), nil
+		}
+	}
+
+	// Fallback to checking origin
+	originMain, err := gs.repo.Reference("refs/remotes/origin/main", false)
+	if err == nil && originMain != nil {
+		return "main", nil
+	}
+
+	originMaster, err := gs.repo.Reference("refs/remotes/origin/master", false)
+	if err == nil && originMaster != nil {
+		return "master", nil
+	}
+
+	// Default to main if nothing else found
+	return "main", nil
+}
+
+// GetCommitsAheadOfMain gets commits that are on the current branch but not on main
+func (gs *GitService) GetCommitsAheadOfMain() ([]Commit, error) {
+	currentBranch, err := gs.GetCurrentBranch()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get current branch: %w", err)
+	}
+
+	defaultBranch, err := gs.GetDefaultBranch()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get default branch: %w", err)
+	}
+
+	// If we're on the default branch, no commits ahead
+	if currentBranch == defaultBranch {
+		return []Commit{}, nil
+	}
+
+	// Get current branch reference
+	currentRef, err := gs.repo.Reference("refs/heads/"+currentBranch, true)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get current branch reference: %w", err)
+	}
+
+	// Get default branch reference
+	defaultRef, err := gs.repo.Reference("refs/heads/"+defaultBranch, true)
+	if err != nil {
+		// Default branch might not exist locally, try to get from HEAD
+		defaultRef, err = gs.repo.Reference("refs/remotes/origin/"+defaultBranch, true)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get default branch reference: %w", err)
+		}
+	}
+
+	// Get commit objects
+	currentCommit, err := gs.repo.CommitObject(currentRef.Hash())
+	if err != nil {
+		return nil, fmt.Errorf("failed to get current commit: %w", err)
+	}
+
+	defaultCommit, err := gs.repo.CommitObject(defaultRef.Hash())
+	if err != nil {
+		return nil, fmt.Errorf("failed to get default commit: %w", err)
+	}
+
+	// Get merge base
+	mergeBase, err := getMergeBase(gs.repo, currentCommit, defaultCommit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get merge base: %w", err)
+	}
+
+	// Get commits from merge base to current head (exclusive of merge base)
+	commitIter, err := gs.repo.Log(&git.LogOptions{
+		From:  currentCommit.Hash,
+		Order: git.LogOrderCommitterTime,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get commit log: %w", err)
+	}
+
+	var commits []Commit
+	foundMergeBase := false
+
+	err = commitIter.ForEach(func(c *object.Commit) error {
+		if c.Hash.String() == mergeBase.Hash.String() {
+			// Stop when we reach the merge base
+			foundMergeBase = true
+			return fmt.Errorf("stop")
+		}
+
+		commits = append(commits, Commit{
+			Hash:      c.Hash.String(),
+			ShortHash: c.Hash.String()[:7],
+			Author:    c.Author.Name,
+			Message:   getFirstLine(c.Message),
+			Date:      c.Author.When.Format("2006-01-02 15:04"),
+		})
+
+		return nil
+	})
+
+	if err != nil && err.Error() != "stop" {
+		return nil, err
+	}
+
+	if !foundMergeBase {
+		// If we didn't find merge base, the branches might have diverged
+		// Return all commits up to a reasonable limit
+		if len(commits) > 50 {
+			commits = commits[:50]
+		}
+	}
+
+	return commits, nil
+}
+
+// getMergeBase finds the merge base of two commits
+func getMergeBase(repo *git.Repository, commit1, commit2 *object.Commit) (*object.Commit, error) {
+	// Simple implementation: find common ancestor
+	// Get all ancestors of commit1
+	ancestors1 := make(map[string]struct{})
+	iter1, err := repo.Log(&git.LogOptions{
+		From:  commit1.Hash,
+		Order: git.LogOrderCommitterTime,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	iter1.ForEach(func(c *object.Commit) error {
+		ancestors1[c.Hash.String()] = struct{}{}
+		return nil
+	})
+
+	// Find first ancestor of commit2 that's also in ancestors1
+	iter2, err := repo.Log(&git.LogOptions{
+		From:  commit2.Hash,
+		Order: git.LogOrderCommitterTime,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var mergeBase *object.Commit
+	iter2.ForEach(func(c *object.Commit) error {
+		if _, ok := ancestors1[c.Hash.String()]; ok {
+			mergeBase = c
+			return fmt.Errorf("found")
+		}
+		return nil
+	})
+
+	if mergeBase == nil {
+		return nil, fmt.Errorf("no common ancestor found")
+	}
+
+	return mergeBase, nil
+}
+
+// getFirstLine extracts the first line from a multi-line message
+func getFirstLine(message string) string {
+	lines := splitLines(message)
+	if len(lines) > 0 {
+		return lines[0]
+	}
+	return message
+}
+
+// GetBranchCompareDiffs gets both staged and unstaged changes for branch comparison
+func (gs *GitService) GetBranchCompareDiffs(logger *Logger) ([]FileDiff, []FileDiff, error) {
+	// Get staged changes
+	staged, err := gs.GetDiff(Staged, DiffOnly, logger)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get staged changes: %w", err)
+	}
+
+	// Get unstaged changes
+	unstaged, err := gs.GetDiff(Unstaged, DiffOnly, logger)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get unstaged changes: %w", err)
+	}
+
+	return staged, unstaged, nil
+}

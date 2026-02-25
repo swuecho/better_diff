@@ -55,11 +55,18 @@ func (m Model) renderHeader() string {
 	modeText := "Unstaged"
 	if m.diffMode == Staged {
 		modeText = "Staged"
+	} else if m.diffMode == BranchCompare {
+		modeText = "Branch Compare"
 	}
 	modeStyle := lipgloss.NewStyle().
 		Foreground(colorYellow).
 		Bold(true)
 	parts = append(parts, modeStyle.Render("["+modeText+"]"))
+
+	// Add commit count for branch compare mode
+	if m.diffMode == BranchCompare && len(m.commits) > 0 {
+		parts = append(parts, subtleStyle.Render(fmt.Sprintf("%d commits ahead", len(m.commits))))
+	}
 
 	// Add view mode indicator
 	viewModeText := "Diff Only"
@@ -121,6 +128,11 @@ func (m Model) renderContent(height int) string {
 }
 
 func (m Model) renderFileTree(width, height int) string {
+	// In branch compare mode, show commits instead of file tree
+	if m.diffMode == BranchCompare {
+		return m.renderCommits(width, height)
+	}
+
 	selectedStyle := lipgloss.NewStyle().
 		Background(lipgloss.Color("235")).
 		Width(width - 2)
@@ -210,6 +222,7 @@ func (m Model) renderFileTree(width, height int) string {
 				stats = fmt.Sprintf(" -%d", node.linesRemoved)
 			}
 			line += statsStyle.Render(stats)
+		}
 		}
 
 		if isSelected && m.panel == FileTreePanel {

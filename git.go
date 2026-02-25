@@ -28,6 +28,15 @@ type FileDiff struct {
 	LinesRemoved int
 }
 
+// Commit represents a git commit
+type Commit struct {
+	Hash      string
+	ShortHash string
+	Author    string
+	Message   string
+	Date      string
+}
+
 // Hunk represents a section of changes
 type Hunk struct {
 	OldStart int
@@ -59,6 +68,7 @@ type DiffMode int
 const (
 	Unstaged DiffMode = iota
 	Staged
+	BranchCompare
 )
 
 // DiffViewMode represents how much context to show in diff
