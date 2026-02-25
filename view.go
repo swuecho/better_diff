@@ -63,11 +63,6 @@ func (m Model) renderHeader() string {
 		Bold(true)
 	parts = append(parts, modeStyle.Render("["+modeText+"]"))
 
-	// Add commit count for branch compare mode
-	if m.diffMode == BranchCompare && len(m.commits) > 0 {
-		parts = append(parts, subtleStyle.Render(fmt.Sprintf("%d commits ahead", len(m.commits))))
-	}
-
 	// Add view mode indicator
 	viewModeText := "Diff Only"
 	if m.diffViewMode == WholeFile {
@@ -128,11 +123,6 @@ func (m Model) renderContent(height int) string {
 }
 
 func (m Model) renderFileTree(width, height int) string {
-	// In branch compare mode, show commits instead of file tree
-	if m.diffMode == BranchCompare {
-		return m.renderCommits(width, height)
-	}
-
 	selectedStyle := lipgloss.NewStyle().
 		Background(lipgloss.Color("235")).
 		Width(width - 2)
@@ -286,13 +276,21 @@ func (m Model) renderDiffPanel(width, height int) string {
 		Foreground(lipgloss.Color("75")). // Blue
 		Bold(true)
 
-	// Get selected file (or all files for branch compare)
+	// Get selected file(s).
 	var filesToRender []*FileDiff
 
-	if m.diffMode == BranchCompare && m.selectedCommit != nil {
-		// Show all files in the commit
-		for i := range m.diffFiles {
-			filesToRender = append(filesToRender, &m.diffFiles[i])
+	if m.diffMode == BranchCompare {
+		// Show all diff entries for selected path (commits + staged + unstaged).
+		flatTree := m.flattenTree()
+		if m.selectedIndex < len(flatTree) {
+			node := flatTree[m.selectedIndex]
+			if !node.isDir {
+				for i := range m.diffFiles {
+					if m.diffFiles[i].Path == node.path {
+						filesToRender = append(filesToRender, &m.diffFiles[i])
+					}
+				}
+			}
 		}
 	} else {
 		// Show selected file from tree
@@ -313,12 +311,12 @@ func (m Model) renderDiffPanel(width, height int) string {
 	// Render all diff lines first
 	var allLines []string
 
-	if m.diffMode == BranchCompare && m.selectedCommit != nil {
-		// Add commit info header
+	if m.diffMode == BranchCompare {
+		// Add branch compare info header.
 		commitHeaderStyle := lipgloss.NewStyle().
 			Foreground(lipgloss.Color("86")).
 			Bold(true)
-		allLines = append(allLines, commitHeaderStyle.Render("Commit: "+m.selectedCommit.ShortHash+" "+m.selectedCommit.Message))
+		allLines = append(allLines, commitHeaderStyle.Render("Branch Compare: combined file changes"))
 		allLines = append(allLines, "")
 	}
 
@@ -326,7 +324,7 @@ func (m Model) renderDiffPanel(width, height int) string {
 		// No file selected
 		msg := "Select a file to view diff"
 		if m.diffMode == BranchCompare {
-			msg = "Select a commit to view changes"
+			msg = "Select a file to view combined changes"
 		}
 		allLines = append(allLines, lipgloss.NewStyle().
 			Foreground(lipgloss.Color("243")).
@@ -442,6 +440,7 @@ func (m Model) renderFooter() string {
 	help := []string{
 		keyStyle.Render("[↑↓]") + " Navigate",
 		keyStyle.Render("[PgUp/PgDn]") + " Page",
+		keyStyle.Render("[gg/G]") + " Top/Bottom",
 		keyStyle.Render("[Enter]") + " Select/Expand",
 		keyStyle.Render("[Tab]") + " Switch Panel",
 		keyStyle.Render("[s]") + " Staged/Unstaged/Branch",
@@ -566,7 +565,7 @@ func (m Model) renderCommits(width, height int) string {
 			"    " + messageStyle.Render(commit.Message)
 
 		if isSelected && m.panel == FileTreePanel {
-			line = selectedStyle.Render(commit.ShortHash+" "+commit.Author+" "+commit.Date)
+			line = selectedStyle.Render(commit.ShortHash + " " + commit.Author + " " + commit.Date)
 			lines = append(lines, line)
 			// Add message on next line
 			lines = append(lines, "    "+messageStyle.Render(commit.Message))

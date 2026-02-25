@@ -603,16 +603,16 @@ func getFirstLine(message string) string {
 	return message
 }
 
-// GetBranchCompareDiffs gets both staged and unstaged changes for branch comparison
-func (gs *GitService) GetBranchCompareDiffs(logger *Logger) ([]FileDiff, []FileDiff, error) {
+// GetBranchCompareDiffs gets both staged and unstaged changes for branch comparison.
+func (gs *GitService) GetBranchCompareDiffs(viewMode DiffViewMode, logger *Logger) ([]FileDiff, []FileDiff, error) {
 	// Get staged changes
-	staged, err := gs.GetDiff(Staged, DiffOnly, logger)
+	staged, err := gs.GetDiff(Staged, viewMode, logger)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get staged changes: %w", err)
 	}
 
 	// Get unstaged changes
-	unstaged, err := gs.GetDiff(Unstaged, DiffOnly, logger)
+	unstaged, err := gs.GetDiff(Unstaged, viewMode, logger)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get unstaged changes: %w", err)
 	}
@@ -637,14 +637,21 @@ func (gs *GitService) GetCommitDiff(commitHash string, logger *Logger) ([]FileDi
 			return nil, fmt.Errorf("failed to get parent commit: %w", err)
 		}
 	} else {
-		// This is the first commit (no parent), compare to empty tree
+		// This is the first commit (no parent), return empty
 		return []FileDiff{}, nil
 	}
 
-	// Get the diff between parent and current commit
+	// Get the patch as a string for debugging
 	patch, err := parentCommit.Patch(commit)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get patch: %w", err)
+	}
+
+	if logger != nil {
+		logger.Info("Got patch from git", map[string]interface{}{
+			"commit":       commitHash[:7],
+			"file_patches": len(patch.FilePatches()),
+		})
 	}
 
 	// Convert patch to FileDiffs
@@ -661,22 +668,20 @@ func (gs *GitService) GetCommitDiff(commitHash string, logger *Logger) ([]FileDi
 			path = to.Path()
 		}
 
-		// Determine change type
-		if from == nil && to != nil {
-			changeType = Added
-		} else if from != nil && to == nil {
-			changeType = Deleted
-		} else if from != nil && to != nil && from.Path() != to.Path() {
-			changeType = Renamed
-		}
-
 		// Generate hunks from patch
 		hunks, err := convertPatchToHunks(filePatch)
-		if err != nil && logger != nil {
-			logger.Warn("Failed to convert patch to hunks", map[string]interface{}{
-				"file": path,
-				"error": err,
-			})
+		if err != nil {
+			if logger != nil {
+				logger.Warn("Failed to convert patch to hunks", map[string]interface{}{
+					"file":  path,
+					"error": err,
+				})
+			}
+			continue
+		}
+
+		// Skip files with no hunks (no actual changes)
+		if len(hunks) == 0 {
 			continue
 		}
 
@@ -693,6 +698,15 @@ func (gs *GitService) GetCommitDiff(commitHash string, logger *Logger) ([]FileDi
 			}
 		}
 
+		if logger != nil {
+			logger.Info("Processed file patch", map[string]interface{}{
+				"path":          path,
+				"hunks":         len(hunks),
+				"lines_added":   linesAdded,
+				"lines_removed": linesRemoved,
+			})
+		}
+
 		files = append(files, FileDiff{
 			Path:         path,
 			ChangeType:   changeType,
@@ -702,74 +716,104 @@ func (gs *GitService) GetCommitDiff(commitHash string, logger *Logger) ([]FileDi
 		})
 	}
 
+	if logger != nil {
+		logger.Info("Loaded commit diff", map[string]interface{}{
+			"commit":     commitHash[:7],
+			"file_count": len(files),
+		})
+	}
+
 	return files, nil
 }
 
 // convertPatchToHunks converts a git Patch to our Hunk format
 func convertPatchToHunks(filePatch diff.FilePatch) ([]Hunk, error) {
-	// Get the patch content for this file
-	var patchText string
-	for _, chunk := range filePatch.Chunks() {
-		patchText += chunk.Content()
+	// Get all chunks from the file patch
+	chunks := filePatch.Chunks()
+
+	// Debug: Log chunk count
+	// fmt.Fprintf(os.Stderr, "DEBUG: FilePatch has %d chunks\n", len(chunks))
+
+	// If no chunks, return empty
+	if len(chunks) == 0 {
+		return []Hunk{}, nil
 	}
 
-	// Parse the unified diff format
-	lines := splitLines(patchText)
 	var hunks []Hunk
-	var currentHunk *Hunk
 
-	for _, line := range lines {
-		// Skip empty lines
-		if len(line) == 0 {
+	// Process each chunk
+	for _, chunk := range chunks {
+		// Get the content of this chunk
+		content := chunk.Content()
+
+		if content == "" {
 			continue
 		}
 
-		// Check for hunk header (@@ -oldStart,oldCount +newStart,newCount @@)
-		if len(line) > 2 && line[0] == '@' && line[1] == '@' {
-			if currentHunk != nil {
-				hunks = append(hunks, *currentHunk)
+		// Split content into lines
+		lines := splitLines(content)
+
+		var currentHunk *Hunk
+		for _, line := range lines {
+			// Skip empty lines
+			if len(line) == 0 {
+				continue
 			}
-			// Start new hunk
-			currentHunk = &Hunk{
-				Lines: []DiffLine{},
+
+			// Check for hunk header (@@ -oldStart,oldCount +newStart,newCount @@)
+			if len(line) > 2 && line[0] == '@' && line[1] == '@' {
+				// Save previous hunk if exists
+				if currentHunk != nil && len(currentHunk.Lines) > 0 {
+					hunks = append(hunks, *currentHunk)
+				}
+				// Start new hunk
+				currentHunk = &Hunk{
+					Lines: []DiffLine{},
+				}
+				continue
 			}
-			continue
+
+			// Parse diff lines
+			var lineType LineType
+			var contentStr string
+
+			switch line[0] {
+			case '+':
+				lineType = LineAdded
+				contentStr = line[1:]
+			case '-':
+				lineType = LineRemoved
+				contentStr = line[1:]
+			case ' ':
+				lineType = LineContext
+				contentStr = line[1:]
+			default:
+				// Skip any other lines (like file paths, etc.)
+				continue
+			}
+
+			// Create hunk if needed
+			if currentHunk == nil {
+				currentHunk = &Hunk{
+					Lines: []DiffLine{},
+				}
+			}
+
+			currentHunk.Lines = append(currentHunk.Lines, DiffLine{
+				Type:    lineType,
+				Content: contentStr,
+				LineNum: 0,
+			})
 		}
 
-		if currentHunk == nil {
-			// Haven't hit a hunk header yet, skip pre-amble
-			continue
+		// Save last hunk from this chunk
+		if currentHunk != nil && len(currentHunk.Lines) > 0 {
+			hunks = append(hunks, *currentHunk)
 		}
-
-		// Parse diff lines
-		var lineType LineType
-		var content string
-
-		switch line[0] {
-		case '+':
-			lineType = LineAdded
-			content = line[1:]
-		case '-':
-			lineType = LineRemoved
-			content = line[1:]
-		case ' ':
-			lineType = LineContext
-			content = line[1:]
-		default:
-			// Skip any other lines (like binary file markers)
-			continue
-		}
-
-		currentHunk.Lines = append(currentHunk.Lines, DiffLine{
-			Type:    lineType,
-			Content: content,
-			LineNum: 0,
-		})
 	}
 
-	if currentHunk != nil {
-		hunks = append(hunks, *currentHunk)
-	}
+	// Debug: Log result
+	// fmt.Fprintf(os.Stderr, "DEBUG: Converted to %d hunks\n", len(hunks))
 
 	return hunks, nil
 }

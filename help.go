@@ -29,10 +29,12 @@ var keyBindings = []KeyBinding{
 	{"down/j", "Move down", "Navigation"},
 	{"pgup", "Page up", "Navigation"},
 	{"pgdown", "Page down", "Navigation"},
+	{"gg", "Jump to top (diff/whole file)", "Navigation"},
+	{"G", "Jump to bottom (diff/whole file)", "Navigation"},
 
 	// Actions
 	{"enter/space", "Select file / Expand directory", "Actions"},
-	{"s", "Toggle staged/unstaged", "Actions"},
+	{"s", "Toggle unstaged/staged/branch compare", "Actions"},
 	{"f", "Toggle diff/whole file view", "Actions"},
 
 	// Panels

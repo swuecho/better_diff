@@ -14,28 +14,29 @@ const (
 
 // Model holds the application state
 type Model struct {
-	git             *GitService // Git service (dependency injection)
-	logger          *Logger     // Logger for error tracking
-	watcher         *Watcher    // File system watcher
-	files           []FileDiff
-	diffFiles       []FileDiff // Files with full diff content
-	fileTree        []TreeNode
-	commits         []Commit   // Commits ahead of main branch
-	selectedCommit  *Commit    // Currently selected commit in branch compare mode
-	selectedIndex   int
-	panel           Panel
-	diffMode        DiffMode
-	diffViewMode    DiffViewMode // Diff view mode (diff-only or whole file)
-	scrollOffset    int          // For file tree scrolling
-	diffScroll      int          // For diff panel scrolling
-	width           int
-	height          int
-	rootPath        string
-	branch          string
-	quitting        bool
-	showHelp        bool // Help modal visibility
-	err             error
-	lastFileHash    string // To detect changes in files
+	git            *GitService // Git service (dependency injection)
+	logger         *Logger     // Logger for error tracking
+	watcher        *Watcher    // File system watcher
+	files          []FileDiff
+	diffFiles      []FileDiff // Files with full diff content
+	fileTree       []TreeNode
+	commits        []Commit // Commits ahead of main branch
+	selectedCommit *Commit  // Currently selected commit in branch compare mode
+	selectedIndex  int
+	panel          Panel
+	diffMode       DiffMode
+	diffViewMode   DiffViewMode // Diff view mode (diff-only or whole file)
+	scrollOffset   int          // For file tree scrolling
+	diffScroll     int          // For diff panel scrolling
+	width          int
+	height         int
+	rootPath       string
+	branch         string
+	quitting       bool
+	showHelp       bool // Help modal visibility
+	err            error
+	lastFileHash   string // To detect changes in files
+	vimPendingG    bool   // Tracks first "g" for "gg" in whole-file navigation
 }
 
 // TreeNode represents a node in the file tree
@@ -200,6 +201,46 @@ func (m Model) LoadCommitDiff(commitHash string) tea.Cmd {
 			return errMsg{err}
 		}
 		return allDiffsLoadedMsg{files}
+	}
+}
+
+// LoadBranchCompareDiff loads commit, staged, and unstaged diffs together.
+func (m Model) LoadBranchCompareDiff(commits []Commit) tea.Cmd {
+	return func() tea.Msg {
+		if m.git == nil {
+			return errMsg{&ServiceError{Message: "Git service not initialized"}}
+		}
+
+		var all []FileDiff
+
+		// Include all commit diffs.
+		for _, commit := range commits {
+			files, err := m.git.GetCommitDiff(commit.Hash, m.logger)
+			if err != nil {
+				if m.logger != nil {
+					m.logger.Error("Failed to get commit diff for branch compare", err, map[string]interface{}{
+						"commit": commit.Hash,
+					})
+				}
+				return errMsg{err}
+			}
+
+			all = append(all, files...)
+		}
+
+		// Include staged and unstaged working changes.
+		staged, unstaged, err := m.git.GetBranchCompareDiffs(m.diffViewMode, m.logger)
+		if err != nil {
+			if m.logger != nil {
+				m.logger.Error("Failed to get staged/unstaged diffs for branch compare", err, nil)
+			}
+			return errMsg{err}
+		}
+
+		all = append(all, staged...)
+		all = append(all, unstaged...)
+
+		return allDiffsLoadedMsg{all}
 	}
 }
 
