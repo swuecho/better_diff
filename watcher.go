@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -41,8 +42,10 @@ func NewWatcher(rootPath string) (*Watcher, error) {
 
 	// Watch working tree recursively (except .git) so unstaged edits are detected.
 	if err := w.addRecursiveDirs(w.rootPath); err != nil {
-		_ = fsWatcher.Close()
-		return nil, err
+		if closeErr := fsWatcher.Close(); closeErr != nil {
+			return nil, fmt.Errorf("initialize watcher: %w (close watcher: %v)", err, closeErr)
+		}
+		return nil, fmt.Errorf("initialize watcher: %w", err)
 	}
 
 	// Add key .git directories to watch
@@ -57,7 +60,7 @@ func NewWatcher(rootPath string) (*Watcher, error) {
 
 	for _, dir := range dirsToWatch {
 		if _, err := os.Stat(dir); err == nil {
-			if fsWatcher.Add(dir) != nil {
+			if err := fsWatcher.Add(dir); err != nil {
 				// Try to add, ignore errors for individual paths
 				continue
 			}
@@ -88,7 +91,9 @@ func (w *Watcher) WaitForChange() tea.Cmd {
 					// Track newly created directories so deep file changes are observed.
 					if event.Op&fsnotify.Create != 0 {
 						if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
-							_ = w.addRecursiveDirs(event.Name)
+							if err := w.addRecursiveDirs(event.Name); err != nil {
+								// Best effort: keep existing watch state even if this directory cannot be added.
+							}
 						}
 					}
 					// Add a small debounce to handle rapid changes

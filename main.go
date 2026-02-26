@@ -22,18 +22,27 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Get git root path for logger fallback
-	gitRootPath, _ := gitService.GetRootPath()
+	// Get git root path for logger fallback.
+	gitRootPath := ""
+	if rootPath, err := gitService.GetRootPath(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to get git root path: %v\n", err)
+	} else {
+		gitRootPath = rootPath
+	}
 
-	// Initialize logger (tries /tmp first, then repo parent dir)
+	// Initialize logger (tries /tmp first, then repo root).
 	logger, err := NewLogger(INFO, gitRootPath)
 	if err != nil {
 		// Log the error but continue - logger will fall back to stderr
-		fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
+		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
 	}
-	defer logger.Close()
+	defer func() {
+		if err := logger.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to close logger: %v\n", err)
+		}
+	}()
 
-	logger.Info("better_diff starting", map[string]interface{}{
+	logger.Info("better_diff starting", map[string]any{
 		"version": appVersion,
 	})
 

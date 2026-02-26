@@ -103,7 +103,9 @@ func (m Model) shouldIgnoreKey(key string) bool {
 
 func (m *Model) quitCmd() tea.Cmd {
 	if m.watcher != nil {
-		_ = m.watcher.Close()
+		if err := m.watcher.Close(); err != nil && m.logger != nil {
+			m.logger.Warn("Failed to close file watcher", map[string]any{"error": err})
+		}
 	}
 	m.quitting = true
 	return tea.Quit
@@ -262,7 +264,7 @@ func (m Model) handleGitInfoLoaded(msg gitInfoMsg) (tea.Model, tea.Cmd) {
 	watcher, err := NewWatcher(m.rootPath)
 	if err != nil {
 		if m.logger != nil {
-			m.logger.Warn("Failed to create file watcher", map[string]interface{}{"error": err})
+			m.logger.Warn("Failed to create file watcher", map[string]any{"error": err})
 		}
 		return m, nil
 	}
@@ -864,7 +866,7 @@ func (m Model) checkWorkingTreeChanges() tea.Msg {
 	files, err := m.git.GetChangedFiles(m.diffMode)
 	if err != nil {
 		if m.logger != nil {
-			m.logger.Error("Failed to check file list for changes", err, map[string]interface{}{
+			m.logger.Error("Failed to check file list for changes", err, map[string]any{
 				"mode": m.diffMode,
 			})
 		}
@@ -874,7 +876,7 @@ func (m Model) checkWorkingTreeChanges() tea.Msg {
 	diffs, err := m.git.GetDiffWithContext(m.diffMode, m.diffViewMode, m.diffContext, m.logger)
 	if err != nil {
 		if m.logger != nil {
-			m.logger.Error("Failed to check diff content for changes", err, map[string]interface{}{
+			m.logger.Error("Failed to check diff content for changes", err, map[string]any{
 				"mode": m.diffMode,
 			})
 		}
@@ -886,16 +888,16 @@ func (m Model) checkWorkingTreeChanges() tea.Msg {
 		return nil
 	}
 
-	m.logChangeDetected(currentHash, map[string]interface{}{"file_count": len(files)})
+	m.logChangeDetected(currentHash, map[string]any{"file_count": len(files)})
 	return filesChangedMsg{files: files, hash: currentHash}
 }
 
-func (m Model) logChangeDetected(newHash string, extra map[string]interface{}) {
+func (m Model) logChangeDetected(newHash string, extra map[string]any) {
 	if m.logger == nil {
 		return
 	}
 
-	fields := map[string]interface{}{
+	fields := map[string]any{
 		"previous_hash": m.lastFileHash,
 		"new_hash":      newHash,
 	}
@@ -930,9 +932,9 @@ func computeDiffHash(files []FileDiff) string {
 	for _, file := range sorted {
 		writeFileDiffSummaryHash(h, file)
 		for _, hunk := range file.Hunks {
-			_, _ = h.Write([]byte(fmt.Sprintf("@@%d,%d,%d,%d\n", hunk.OldStart, hunk.OldCount, hunk.NewStart, hunk.NewCount)))
+			writeHashString(h, fmt.Sprintf("@@%d,%d,%d,%d\n", hunk.OldStart, hunk.OldCount, hunk.NewStart, hunk.NewCount))
 			for _, line := range hunk.Lines {
-				_, _ = h.Write([]byte(fmt.Sprintf("%d|%s\n", line.Type, line.Content)))
+				writeHashString(h, fmt.Sprintf("%d|%s\n", line.Type, line.Content))
 			}
 		}
 	}
@@ -951,7 +953,12 @@ func sortedFilesByPathAndType(files []FileDiff) []FileDiff {
 }
 
 func writeFileDiffSummaryHash(hasher hash.Hash64, file FileDiff) {
-	_, _ = hasher.Write([]byte(fmt.Sprintf("%s|%d|%d|%d\n", file.Path, file.ChangeType, file.LinesAdded, file.LinesRemoved)))
+	writeHashString(hasher, fmt.Sprintf("%s|%d|%d|%d\n", file.Path, file.ChangeType, file.LinesAdded, file.LinesRemoved))
+}
+
+func writeHashString(hasher hash.Hash64, content string) {
+	// fnv hash writers used here do not return write errors.
+	_, _ = hasher.Write([]byte(content))
 }
 
 func computeBranchCompareHash(files []FileDiff, commits []Commit) string {
@@ -961,17 +968,17 @@ func computeBranchCompareHash(files []FileDiff, commits []Commit) string {
 	}
 
 	h := fnv.New64a()
-	_, _ = h.Write([]byte(base))
+	writeHashString(h, base)
 	for _, c := range commits {
-		_, _ = h.Write([]byte("|" + c.Hash))
+		writeHashString(h, "|"+c.Hash)
 	}
 	return fmt.Sprintf("%x", h.Sum64())
 }
 
 func computeFilesAndDiffHash(files []FileDiff, diffs []FileDiff) string {
 	h := fnv.New64a()
-	_, _ = h.Write([]byte("files=" + computeFileHash(files)))
-	_, _ = h.Write([]byte("|diffs=" + computeDiffHash(diffs)))
+	writeHashString(h, "files="+computeFileHash(files))
+	writeHashString(h, "|diffs="+computeDiffHash(diffs))
 	return fmt.Sprintf("%x", h.Sum64())
 }
 

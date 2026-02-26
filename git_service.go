@@ -221,7 +221,7 @@ func (gs *GitService) GetDiffWithContext(mode DiffMode, viewMode DiffViewMode, c
 		if err != nil {
 			// Log error but continue with other files
 			if logger != nil {
-				logger.Error("Failed to get file diff", err, map[string]interface{}{
+				logger.Error("Failed to get file diff", err, map[string]any{
 					"file": path,
 					"mode": mode,
 				})
@@ -451,7 +451,7 @@ func enforceSizeLimit(path string, content []byte, logger *Logger, warnMsg, errF
 		return nil
 	}
 	if logger != nil {
-		logger.Warn(warnMsg, map[string]interface{}{
+		logger.Warn(warnMsg, map[string]any{
 			"file": path,
 			"size": len(content),
 			"max":  MaxFileSize,
@@ -740,7 +740,7 @@ func (gs *GitService) buildUnifiedBranchCompareFileDiff(path string, baseCommit 
 	oldContent, oldExists, err := gs.readFileFromCommit(baseCommit, path, logger)
 	if err != nil {
 		if logger != nil {
-			logger.Error("Skipping file in branch compare: failed to read base content", err, map[string]interface{}{
+			logger.Error("Skipping file in branch compare: failed to read base content", err, map[string]any{
 				"file": path,
 			})
 		}
@@ -750,7 +750,7 @@ func (gs *GitService) buildUnifiedBranchCompareFileDiff(path string, baseCommit 
 	newContent, newExists, err := gs.readFileFromWorktree(worktree, path, logger)
 	if err != nil {
 		if logger != nil {
-			logger.Error("Skipping file in branch compare: failed to read worktree content", err, map[string]interface{}{
+			logger.Error("Skipping file in branch compare: failed to read worktree content", err, map[string]any{
 				"file": path,
 			})
 		}
@@ -894,7 +894,7 @@ func (gs *GitService) GetCommitDiff(commitHash string, logger *Logger) ([]FileDi
 	}
 
 	if logger != nil {
-		logger.Info("Got patch from git", map[string]interface{}{
+		logger.Info("Got patch from git", map[string]any{
 			"commit":       commitHash[:7],
 			"file_patches": len(patch.FilePatches()),
 		})
@@ -929,7 +929,7 @@ func convertPatchToFileDiffs(filePatches []diff.FilePatch, logger *Logger, commi
 		hunks, err := convertPatchToHunks(filePatch)
 		if err != nil {
 			if logger != nil {
-				logger.Warn("Failed to convert patch to hunks", map[string]interface{}{
+				logger.Warn("Failed to convert patch to hunks", map[string]any{
 					"file":  path,
 					"error": err,
 				})
@@ -943,7 +943,7 @@ func convertPatchToFileDiffs(filePatches []diff.FilePatch, logger *Logger, commi
 
 		linesAdded, linesRemoved := countHunkLineStats(hunks)
 		if logger != nil {
-			logger.Info("Processed file patch", map[string]interface{}{
+			logger.Info("Processed file patch", map[string]any{
 				"path":          path,
 				"hunks":         len(hunks),
 				"lines_added":   linesAdded,
@@ -961,7 +961,7 @@ func convertPatchToFileDiffs(filePatches []diff.FilePatch, logger *Logger, commi
 	}
 
 	if logger != nil {
-		logger.Info("Loaded commit diff", map[string]interface{}{
+		logger.Info("Loaded commit diff", map[string]any{
 			"commit":     commitHash[:7],
 			"file_count": len(files),
 		})

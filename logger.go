@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -52,13 +53,13 @@ func (l LogLevel) Color() string {
 
 // Logger handles structured logging
 type Logger struct {
-	mu       sync.Mutex
-	level    LogLevel
-	output   io.Writer
-	quiet    bool
-	stats    *ErrorStats
-	file     *os.File
-	isFile   bool
+	mu     sync.Mutex
+	level  LogLevel
+	output io.Writer
+	quiet  bool
+	stats  *ErrorStats
+	file   *os.File
+	isFile bool
 }
 
 // ErrorStats tracks error statistics
@@ -72,7 +73,7 @@ type ErrorStats struct {
 }
 
 // NewLogger creates a new logger with the specified level
-// Tries to write to /tmp/better_diff.log first, then falls back to repo parent dir
+// Tries to write to /tmp/better_diff.log first, then falls back to repo root.
 // If both fail, uses stderr and returns an error
 func NewLogger(level LogLevel, gitRootPath string) (*Logger, error) {
 	logger := &Logger{
@@ -84,11 +85,13 @@ func NewLogger(level LogLevel, gitRootPath string) (*Logger, error) {
 
 	// Try /tmp first
 	logFilePath := "/tmp/better_diff.log"
+	pathsTried := []string{logFilePath}
 	file, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
-		// Fall back to git repo parent directory
+		// Fall back to git repository root.
 		if gitRootPath != "" {
 			logFilePath = gitRootPath + "/better_diff.log"
+			pathsTried = append(pathsTried, logFilePath)
 			file, err = os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 			if err == nil {
 				logger.output = file
@@ -98,7 +101,7 @@ func NewLogger(level LogLevel, gitRootPath string) (*Logger, error) {
 			}
 		}
 		// If both fail, return logger with stderr but also return error
-		return logger, fmt.Errorf("failed to open log file (tried /tmp and %s): %w", logFilePath, err)
+		return logger, fmt.Errorf("failed to open log file (tried %s): %w", strings.Join(pathsTried, ", "), err)
 	}
 
 	logger.output = file
@@ -143,7 +146,7 @@ func (l *Logger) GetStats() ErrorStats {
 }
 
 // log is the internal logging method
-func (l *Logger) log(level LogLevel, msg string, err error, fields map[string]interface{}) {
+func (l *Logger) log(level LogLevel, msg string, err error, fields map[string]any) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -205,22 +208,22 @@ func (l *Logger) log(level LogLevel, msg string, err error, fields map[string]in
 }
 
 // Debug logs a debug message
-func (l *Logger) Debug(msg string, fields map[string]interface{}) {
+func (l *Logger) Debug(msg string, fields map[string]any) {
 	l.log(DEBUG, msg, nil, fields)
 }
 
 // Info logs an info message
-func (l *Logger) Info(msg string, fields map[string]interface{}) {
+func (l *Logger) Info(msg string, fields map[string]any) {
 	l.log(INFO, msg, nil, fields)
 }
 
 // Warn logs a warning message
-func (l *Logger) Warn(msg string, fields map[string]interface{}) {
+func (l *Logger) Warn(msg string, fields map[string]any) {
 	l.log(WARN, msg, nil, fields)
 }
 
 // Error logs an error message
-func (l *Logger) Error(msg string, err error, fields map[string]interface{}) {
+func (l *Logger) Error(msg string, err error, fields map[string]any) {
 	l.log(ERROR, msg, err, fields)
 }
 

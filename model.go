@@ -85,7 +85,7 @@ func (m Model) ensureGitService() error {
 	return &ServiceError{Message: gitServiceNotInitializedMessage}
 }
 
-func (m Model) logAndWrapError(message string, err error, fields map[string]interface{}) tea.Msg {
+func (m Model) logAndWrapError(message string, err error, fields map[string]any) tea.Msg {
 	if m.logger != nil {
 		m.logger.Error(message, err, fields)
 	}
@@ -129,7 +129,7 @@ func (m Model) LoadFiles() tea.Cmd {
 
 		files, err := m.git.GetChangedFiles(m.diffMode)
 		if err != nil {
-			return m.logAndWrapError("Failed to get changed files", err, map[string]interface{}{
+			return m.logAndWrapError("Failed to get changed files", err, map[string]any{
 				"mode": m.diffMode,
 			})
 		}
@@ -146,7 +146,7 @@ func (m Model) LoadDiff(path string) tea.Cmd {
 
 		files, err := m.git.GetDiffWithContext(m.diffMode, m.diffViewMode, m.diffContext, m.logger)
 		if err != nil {
-			return m.logAndWrapError("Failed to get diff", err, map[string]interface{}{
+			return m.logAndWrapError("Failed to get diff", err, map[string]any{
 				"file": path,
 				"mode": m.diffMode,
 			})
@@ -168,7 +168,7 @@ func (m Model) LoadAllDiffs() tea.Cmd {
 
 		files, err := m.git.GetDiffWithContext(m.diffMode, m.diffViewMode, m.diffContext, m.logger)
 		if err != nil {
-			return m.logAndWrapError("Failed to get all diffs", err, map[string]interface{}{
+			return m.logAndWrapError("Failed to get all diffs", err, map[string]any{
 				"mode": m.diffMode,
 			})
 		}
@@ -200,7 +200,7 @@ func (m Model) LoadCommitDiff(commitHash string) tea.Cmd {
 
 		files, err := m.git.GetCommitDiff(commitHash, m.logger)
 		if err != nil {
-			return m.logAndWrapError("Failed to get commit diff", err, map[string]interface{}{
+			return m.logAndWrapError("Failed to get commit diff", err, map[string]any{
 				"commit": commitHash,
 			})
 		}
@@ -217,7 +217,7 @@ func (m Model) LoadBranchCompareDiff(commits []Commit) tea.Cmd {
 
 		files, err := m.git.GetUnifiedBranchCompareDiff(m.diffViewMode, m.diffContext, m.logger)
 		if err != nil {
-			return m.logAndWrapError("Failed to get unified branch compare diff", err, map[string]interface{}{
+			return m.logAndWrapError("Failed to get unified branch compare diff", err, map[string]any{
 				"commit_count": len(commits),
 			})
 		}
