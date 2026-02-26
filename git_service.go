@@ -14,9 +14,11 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
+var errStopCommitIteration = errors.New("stop commit iteration")
+
 // sortStrings sorts a slice of strings in place
-func sortStrings(s []string) {
-	sort.Strings(s)
+func sortStrings(items []string) {
+	sort.Strings(items)
 }
 
 func isObjectNotFoundError(err error) bool {
@@ -448,10 +450,10 @@ func branchRefCandidates(branch string) []plumbing.ReferenceName {
 	}
 }
 
-func (gs *GitService) resolveBranchRef(branch string, resolved bool) (*plumbing.Reference, error) {
+func (gs *GitService) findBranchReference(branch string) (*plumbing.Reference, error) {
 	var lastErr error
 	for _, refName := range branchRefCandidates(branch) {
-		ref, err := gs.repo.Reference(refName, resolved)
+		ref, err := gs.repo.Reference(refName, false)
 		if err == nil && ref != nil {
 			return ref, nil
 		}
@@ -466,7 +468,7 @@ func (gs *GitService) resolveBranchRef(branch string, resolved bool) (*plumbing.
 // GetDefaultBranch returns the default branch name (main or master)
 func (gs *GitService) GetDefaultBranch() (string, error) {
 	for _, branch := range []string{"main", "master", "develop"} {
-		if _, err := gs.resolveBranchRef(branch, false); err == nil {
+		if _, err := gs.findBranchReference(branch); err == nil {
 			return branch, nil
 		}
 	}
@@ -499,7 +501,7 @@ func (gs *GitService) GetCommitsAheadOfMain() ([]Commit, error) {
 	}
 
 	// Get default branch reference.
-	defaultRef, err := gs.resolveBranchRef(defaultBranch, true)
+	defaultRef, err := gs.findBranchReference(defaultBranch)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get default branch reference: %w", err)
 	}
@@ -537,7 +539,7 @@ func (gs *GitService) GetCommitsAheadOfMain() ([]Commit, error) {
 		if c.Hash.String() == mergeBase.Hash.String() {
 			// Stop when we reach the merge base
 			foundMergeBase = true
-			return fmt.Errorf("stop")
+			return errStopCommitIteration
 		}
 
 		commits = append(commits, Commit{
@@ -551,7 +553,7 @@ func (gs *GitService) GetCommitsAheadOfMain() ([]Commit, error) {
 		return nil
 	})
 
-	if err != nil && err.Error() != "stop" {
+	if err != nil && !errors.Is(err, errStopCommitIteration) {
 		return nil, err
 	}
 
@@ -722,7 +724,7 @@ func (gs *GitService) getDefaultBranchCommit() (*object.Commit, error) {
 		return nil, err
 	}
 
-	ref, err := gs.resolveBranchRef(defaultBranch, true)
+	ref, err := gs.findBranchReference(defaultBranch)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get default branch reference: %w", err)
 	}
@@ -935,52 +937,37 @@ func (gs *GitService) GetCommitDiff(commitHash string, logger *Logger) ([]FileDi
 
 // convertPatchToHunks converts a git Patch to our Hunk format
 func convertPatchToHunks(filePatch diff.FilePatch) ([]Hunk, error) {
-	// Get all chunks from the file patch
 	chunks := filePatch.Chunks()
-
-	// Debug: Log chunk count
-	// fmt.Fprintf(os.Stderr, "DEBUG: FilePatch has %d chunks\n", len(chunks))
-
-	// If no chunks, return empty
 	if len(chunks) == 0 {
 		return []Hunk{}, nil
 	}
 
 	var hunks []Hunk
 
-	// Process each chunk
 	for _, chunk := range chunks {
-		// Get the content of this chunk
 		content := chunk.Content()
-
 		if content == "" {
 			continue
 		}
 
-		// Split content into lines
 		lines := splitLines(content)
 
 		var currentHunk *Hunk
 		for _, line := range lines {
-			// Skip empty lines
 			if len(line) == 0 {
 				continue
 			}
 
-			// Check for hunk header (@@ -oldStart,oldCount +newStart,newCount @@)
 			if len(line) > 2 && line[0] == '@' && line[1] == '@' {
-				// Save previous hunk if exists
 				if currentHunk != nil && len(currentHunk.Lines) > 0 {
 					hunks = append(hunks, *currentHunk)
 				}
-				// Start new hunk
 				currentHunk = &Hunk{
 					Lines: []DiffLine{},
 				}
 				continue
 			}
 
-			// Parse diff lines
 			var lineType LineType
 			var contentStr string
 
@@ -995,11 +982,9 @@ func convertPatchToHunks(filePatch diff.FilePatch) ([]Hunk, error) {
 				lineType = LineContext
 				contentStr = line[1:]
 			default:
-				// Skip any other lines (like file paths, etc.)
 				continue
 			}
 
-			// Create hunk if needed
 			if currentHunk == nil {
 				currentHunk = &Hunk{
 					Lines: []DiffLine{},
@@ -1013,14 +998,10 @@ func convertPatchToHunks(filePatch diff.FilePatch) ([]Hunk, error) {
 			})
 		}
 
-		// Save last hunk from this chunk
 		if currentHunk != nil && len(currentHunk.Lines) > 0 {
 			hunks = append(hunks, *currentHunk)
 		}
 	}
-
-	// Debug: Log result
-	// fmt.Fprintf(os.Stderr, "DEBUG: Converted to %d hunks\n", len(hunks))
 
 	return hunks, nil
 }

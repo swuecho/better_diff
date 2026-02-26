@@ -41,7 +41,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
-	m.clearPendingGIfNeeded(key)
+	m.resetPendingVimTopJumpIfNeeded(key)
 	if m.shouldIgnoreKey(key) {
 		return m, nil
 	}
@@ -91,7 +91,7 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
-func (m *Model) clearPendingGIfNeeded(key string) {
+func (m *Model) resetPendingVimTopJumpIfNeeded(key string) {
 	if key != "g" {
 		m.vimPendingG = false
 	}
