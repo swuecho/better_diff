@@ -1,58 +1,61 @@
-# Clean Code Guidelines
+# Code Style Guide
 
-Use this checklist for all changes in this repository.
+Use this guide for all changes in this repository.
+
+## Core Principles
+- Optimize for readability and maintainability over cleverness.
+- Make behavior explicit; avoid hidden side effects and surprising control flow.
+- Keep changes focused and incremental.
+- Leave touched code cleaner than before.
+
+## Go Conventions
+- Always run `gofmt` (or `go fmt ./...`) before submitting.
+- Keep imports grouped and sorted by `gofmt`; do not hand-align.
+- Prefer standard Go naming: short receiver names, mixedCaps, exported names only when needed.
+- Keep package boundaries clear; avoid cross-package coupling unless it is justified.
 
 ## Naming
 - Use intention-revealing names (`calculateTotalPrice`, not `calc`).
-- Avoid disinformation (do not imply an incorrect type or behavior).
-- Avoid meaningless distinctions (`data`, `info`, `value` without context).
-- Prefer pronounceable and searchable names.
-- Avoid single-letter identifiers except short loop counters.
+- Avoid ambiguous placeholders like `data`, `info`, `value`, `tmp`.
+- Use domain terms consistently across files and layers.
+- Allow short names only for narrow scopes (`i`, `j`, `err`, receiver names).
 
-## Functions
-- Keep functions small and focused on one responsibility.
-- Scrutinize functions longer than ~20 lines.
-- Prefer 0-2 arguments where possible.
-- Avoid flag arguments.
-- Avoid hidden side effects.
-- Use exceptions/errors over magic return codes.
-
-## Comments
-- Prefer self-explanatory code over explanatory comments.
-- Do not add obvious comments.
-- Use comments for intent, constraints, warnings, or legal context.
-- Remove commented-out code.
-
-## Formatting
-- Keep related concepts physically close.
-- Do not overuse horizontal alignment.
-- Follow team consistency over personal preference.
-
-## Objects and Data Structures
-- Prefer "tell, don't ask" behavior.
-- Follow Law of Demeter (avoid deep object navigation chains).
+## Functions and Methods
+- Keep functions focused on one responsibility.
+- Prefer small functions; if a function exceeds ~30 lines, consider splitting it.
+- Keep parameter lists small; avoid boolean flags that change behavior.
+- Make mutations obvious from function names and signatures.
+- Return early on guard conditions to reduce nesting.
 
 ## Error Handling
-- Use errors for exceptional paths, not normal control flow.
-- Add contextual information to errors.
-- Avoid returning or passing `nil` where a safer alternative exists.
+- Return `error` values; do not use panic for expected failures.
+- Wrap errors with context using `%w` when propagating (`fmt.Errorf("load config: %w", err)`).
+- Keep error messages lowercase and without trailing punctuation.
+- Do not silently ignore errors unless explicitly documented and safe.
+
+## Data and State
+- Prefer explicit state transitions over implicit mutation.
+- Keep structs cohesive; avoid "god structs" with unrelated fields.
+- Pass dependencies explicitly; avoid hidden globals.
+- Avoid deep object navigation chains; move behavior closer to the data.
+
+## Comments and Docs
+- Write code that is readable without comments first.
+- Use comments for intent, invariants, non-obvious constraints, and tradeoffs.
+- Keep comments accurate; update or remove stale comments in the same change.
+- Remove commented-out code instead of keeping it in source.
 
 ## Testing
-- Follow FIRST: Fast, Independent, Repeatable, Self-validating, Timely.
-- Keep each test focused on one behavior/concept.
-- Keep tests readable and maintainable.
+- Add or update tests for behavior changes and bug fixes.
+- Keep tests deterministic and isolated (no time/network/flaky dependencies unless controlled).
+- Prefer table-driven tests when validating multiple scenarios.
+- Assert externally visible behavior, not implementation details.
+- Keep tests readable; clear setup, action, assertion.
 
-## General
-- Follow the Boy Scout Rule: leave code cleaner than you found it.
-- Apply DRY thoughtfully; prefer duplication over bad abstraction.
-- Favor open/closed design: open for extension, closed for modification.
-- Depend on abstractions, not concretions.
-
-## PR Review Checklist
-- Are names intention-revealing and unambiguous?
-- Does each function do one thing?
-- Are side effects explicit and justified?
-- Are comments necessary and intent-focused?
-- Is error handling contextual and consistent?
-- Do tests clearly verify behavior and remain readable?
-- Is the change cleaner than the previous version?
+## Review Checklist
+- Is the change formatted and idiomatic Go?
+- Are names and APIs clear and intention-revealing?
+- Are responsibilities well-separated with minimal side effects?
+- Is error handling contextual, wrapped, and consistent?
+- Are tests covering success, failure, and edge cases?
+- Did this change reduce or at least not increase technical debt?
