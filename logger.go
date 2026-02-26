@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -35,22 +36,6 @@ func (l LogLevel) String() string {
 	}
 }
 
-// Color returns the ANSI color code for the log level
-func (l LogLevel) Color() string {
-	switch l {
-	case DEBUG:
-		return "\033[36m" // Cyan
-	case INFO:
-		return "\033[32m" // Green
-	case WARN:
-		return "\033[33m" // Yellow
-	case ERROR:
-		return "\033[31m" // Red
-	default:
-		return "\033[0m" // Reset
-	}
-}
-
 // Logger handles structured logging
 type Logger struct {
 	mu     sync.Mutex
@@ -59,7 +44,6 @@ type Logger struct {
 	quiet  bool
 	stats  *ErrorStats
 	file   *os.File
-	isFile bool
 }
 
 // ErrorStats tracks error statistics
@@ -72,31 +56,33 @@ type ErrorStats struct {
 	LastErrorTime time.Time
 }
 
+func newDefaultLogger(level LogLevel) *Logger {
+	return &Logger{
+		level:  level,
+		output: os.Stderr,
+		stats:  &ErrorStats{ByType: make(map[string]int)},
+	}
+}
+
 // NewLogger creates a new logger with the specified level
 // Tries to write to /tmp/better_diff.log first, then falls back to repo root.
 // If both fail, uses stderr and returns an error
 func NewLogger(level LogLevel, gitRootPath string) (*Logger, error) {
-	logger := &Logger{
-		level:  level,
-		output: os.Stderr,
-		stats:  &ErrorStats{ByType: make(map[string]int)},
-		isFile: false,
-	}
+	logger := newDefaultLogger(level)
 
 	// Try /tmp first
 	logFilePath := "/tmp/better_diff.log"
 	pathsTried := []string{logFilePath}
-	file, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	file, err := openLogFile(logFilePath)
 	if err != nil {
 		// Fall back to git repository root.
 		if gitRootPath != "" {
-			logFilePath = gitRootPath + "/better_diff.log"
+			logFilePath = filepath.Join(gitRootPath, "better_diff.log")
 			pathsTried = append(pathsTried, logFilePath)
-			file, err = os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+			file, err = openLogFile(logFilePath)
 			if err == nil {
 				logger.output = file
 				logger.file = file
-				logger.isFile = true
 				return logger, nil
 			}
 		}
@@ -106,8 +92,12 @@ func NewLogger(level LogLevel, gitRootPath string) (*Logger, error) {
 
 	logger.output = file
 	logger.file = file
-	logger.isFile = true
 	return logger, nil
+}
+
+func openLogFile(path string) (*os.File, error) {
+	const logFilePermission = 0o644
+	return os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, logFilePermission)
 }
 
 // SetOutput sets the output destination for log messages
@@ -192,13 +182,13 @@ func (l *Logger) log(level LogLevel, msg string, err error, fields map[string]an
 	// Add fields if present
 	if len(fields) > 0 {
 		message += " {"
-		first := true
-		for k, v := range fields {
-			if !first {
+		keys := sortedFieldKeys(fields)
+		for i, k := range keys {
+			if i > 0 {
 				message += ", "
 			}
+			v := fields[k]
 			message += fmt.Sprintf("%s: %v", k, v)
-			first = false
 		}
 		message += "}"
 	}
@@ -228,23 +218,27 @@ func (l *Logger) Error(msg string, err error, fields map[string]any) {
 }
 
 // Debugf logs a formatted debug message
-func (l *Logger) Debugf(format string, args ...interface{}) {
-	l.log(DEBUG, fmt.Sprintf(format, args...), nil, nil)
+func (l *Logger) Debugf(format string, args ...any) {
+	l.logf(DEBUG, format, args...)
 }
 
 // Infof logs a formatted info message
-func (l *Logger) Infof(format string, args ...interface{}) {
-	l.log(INFO, fmt.Sprintf(format, args...), nil, nil)
+func (l *Logger) Infof(format string, args ...any) {
+	l.logf(INFO, format, args...)
 }
 
 // Warnf logs a formatted warning message
-func (l *Logger) Warnf(format string, args ...interface{}) {
-	l.log(WARN, fmt.Sprintf(format, args...), nil, nil)
+func (l *Logger) Warnf(format string, args ...any) {
+	l.logf(WARN, format, args...)
 }
 
 // Errorf logs a formatted error message
-func (l *Logger) Errorf(format string, args ...interface{}) {
-	l.log(ERROR, fmt.Sprintf(format, args...), nil, nil)
+func (l *Logger) Errorf(format string, args ...any) {
+	l.logf(ERROR, format, args...)
+}
+
+func (l *Logger) logf(level LogLevel, format string, args ...any) {
+	l.log(level, fmt.Sprintf(format, args...), nil, nil)
 }
 
 // HasErrors returns true if any errors have been logged
@@ -280,14 +274,6 @@ func (l *Logger) Reset() {
 }
 
 // helper function to copy a map
-func copyMap(m map[string]int) map[string]int {
-	result := make(map[string]int, len(m))
-	for k, v := range m {
-		result[k] = v
-	}
-	return result
-}
-
 // Close closes the log file if one is open
 func (l *Logger) Close() error {
 	l.mu.Lock()

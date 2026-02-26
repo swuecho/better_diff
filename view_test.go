@@ -608,3 +608,98 @@ func TestViewWithSpecialCharacters(t *testing.T) {
 
 	// Should handle special characters gracefully
 }
+
+func TestComputeScrollPercent(t *testing.T) {
+	tests := []struct {
+		name         string
+		scrollPos    int
+		totalLines   int
+		visibleLines int
+		want         int
+	}{
+		{name: "no scrollable content", scrollPos: 0, totalLines: 10, visibleLines: 10, want: 100},
+		{name: "top", scrollPos: 0, totalLines: 100, visibleLines: 20, want: 0},
+		{name: "middle", scrollPos: 40, totalLines: 100, visibleLines: 20, want: 50},
+		{name: "bottom", scrollPos: 80, totalLines: 100, visibleLines: 20, want: 100},
+		{name: "clamp low", scrollPos: -5, totalLines: 100, visibleLines: 20, want: 0},
+		{name: "clamp high", scrollPos: 1000, totalLines: 100, visibleLines: 20, want: 100},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := computeScrollPercent(tt.scrollPos, tt.totalLines, tt.visibleLines)
+			if got != tt.want {
+				t.Fatalf("computeScrollPercent(%d, %d, %d) = %d, want %d", tt.scrollPos, tt.totalLines, tt.visibleLines, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestClamp(t *testing.T) {
+	tests := []struct {
+		name  string
+		value int
+		lower int
+		upper int
+		want  int
+	}{
+		{name: "in range", value: 5, lower: 0, upper: 10, want: 5},
+		{name: "below range", value: -1, lower: 0, upper: 10, want: 0},
+		{name: "above range", value: 11, lower: 0, upper: 10, want: 10},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := clamp(tt.value, tt.lower, tt.upper)
+			if got != tt.want {
+				t.Fatalf("clamp(%d, %d, %d) = %d, want %d", tt.value, tt.lower, tt.upper, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPanelContentHeight(t *testing.T) {
+	tests := []struct {
+		name   string
+		height int
+		want   int
+	}{
+		{name: "normal", height: 10, want: 8},
+		{name: "small", height: 1, want: 0},
+		{name: "zero", height: 0, want: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := panelContentHeight(tt.height)
+			if got != tt.want {
+				t.Fatalf("panelContentHeight(%d) = %d, want %d", tt.height, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestVisibleRange(t *testing.T) {
+	tests := []struct {
+		name   string
+		start  int
+		window int
+		length int
+		wantA  int
+		wantB  int
+	}{
+		{name: "basic", start: 2, window: 3, length: 10, wantA: 2, wantB: 5},
+		{name: "start clamped low", start: -1, window: 3, length: 10, wantA: 0, wantB: 3},
+		{name: "start clamped high", start: 50, window: 3, length: 10, wantA: 10, wantB: 10},
+		{name: "end clamped", start: 8, window: 10, length: 10, wantA: 8, wantB: 10},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotA, gotB := visibleRange(tt.start, tt.window, tt.length)
+			if gotA != tt.wantA || gotB != tt.wantB {
+				t.Fatalf("visibleRange(%d, %d, %d) = (%d, %d), want (%d, %d)", tt.start, tt.window, tt.length, gotA, gotB, tt.wantA, tt.wantB)
+			}
+		})
+	}
+}

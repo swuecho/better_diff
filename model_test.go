@@ -61,6 +61,18 @@ func TestNewModel(t *testing.T) {
 	}
 }
 
+func TestNewModelWithNilLogger(t *testing.T) {
+	gitService, err := NewGitService()
+	if err != nil {
+		t.Skip("Skipping test: git service not available")
+	}
+
+	model := NewModel(gitService, nil)
+	if model.logger == nil {
+		t.Fatal("NewModel() should provide a default logger when input logger is nil")
+	}
+}
+
 func TestModelInit(t *testing.T) {
 	model := setupModel(t)
 

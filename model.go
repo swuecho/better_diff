@@ -1,6 +1,9 @@
 package main
 
 import (
+	"errors"
+	"fmt"
+
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -40,7 +43,7 @@ type Model struct {
 	diffContext    int    // Context lines in Diff Only mode
 }
 
-const gitServiceNotInitializedMessage = "Git service not initialized"
+var errGitServiceNotInitialized = errors.New("git service not initialized")
 
 // TreeNode represents a node in the file tree
 type TreeNode struct {
@@ -57,6 +60,10 @@ type TreeNode struct {
 
 // NewModel creates a new model with GitService and Logger
 func NewModel(gitService *GitService, logger *Logger) Model {
+	if logger == nil {
+		logger = newDefaultLogger(INFO)
+	}
+
 	return Model{
 		git:          gitService,
 		logger:       logger,
@@ -82,14 +89,21 @@ func (m Model) ensureGitService() error {
 	if m.git != nil {
 		return nil
 	}
-	return &ServiceError{Message: gitServiceNotInitializedMessage}
+	return errGitServiceNotInitialized
 }
 
 func (m Model) logAndWrapError(message string, err error, fields map[string]any) tea.Msg {
-	if m.logger != nil {
-		m.logger.Error(message, err, fields)
+	m.logger.Error(message, err, fields)
+	return errMsg{fmt.Errorf("%s: %w", message, err)}
+}
+
+func (m Model) withGitService(load func() tea.Msg) tea.Cmd {
+	return func() tea.Msg {
+		if err := m.ensureGitService(); err != nil {
+			return errMsg{err}
+		}
+		return load()
 	}
-	return errMsg{err}
 }
 
 func findFileDiffByPath(files []FileDiff, path string) (FileDiff, bool) {
@@ -103,50 +117,38 @@ func findFileDiffByPath(files []FileDiff, path string) (FileDiff, bool) {
 
 // LoadGitInfo loads git repository info
 func (m Model) LoadGitInfo() tea.Cmd {
-	return func() tea.Msg {
-		if err := m.ensureGitService(); err != nil {
-			return errMsg{err}
-		}
-
+	return m.withGitService(func() tea.Msg {
 		rootPath, err := m.git.GetRootPath()
 		if err != nil {
-			return m.logAndWrapError("Failed to get root path", err, nil)
+			return m.logAndWrapError("get root path", err, nil)
 		}
 		branch, err := m.git.GetCurrentBranch()
 		if err != nil {
-			return m.logAndWrapError("Failed to get current branch", err, nil)
+			return m.logAndWrapError("get current branch", err, nil)
 		}
 		return gitInfoMsg{rootPath, branch}
-	}
+	})
 }
 
 // LoadFiles loads changed files
 func (m Model) LoadFiles() tea.Cmd {
-	return func() tea.Msg {
-		if err := m.ensureGitService(); err != nil {
-			return errMsg{err}
-		}
-
+	return m.withGitService(func() tea.Msg {
 		files, err := m.git.GetChangedFiles(m.diffMode)
 		if err != nil {
-			return m.logAndWrapError("Failed to get changed files", err, map[string]any{
+			return m.logAndWrapError("get changed files", err, map[string]any{
 				"mode": m.diffMode,
 			})
 		}
 		return filesLoadedMsg{files}
-	}
+	})
 }
 
 // LoadDiff loads the diff for a specific file
 func (m Model) LoadDiff(path string) tea.Cmd {
-	return func() tea.Msg {
-		if err := m.ensureGitService(); err != nil {
-			return errMsg{err}
-		}
-
+	return m.withGitService(func() tea.Msg {
 		files, err := m.git.GetDiffWithContext(m.diffMode, m.diffViewMode, m.diffContext, m.logger)
 		if err != nil {
-			return m.logAndWrapError("Failed to get diff", err, map[string]any{
+			return m.logAndWrapError("get diff", err, map[string]any{
 				"file": path,
 				"mode": m.diffMode,
 			})
@@ -156,83 +158,58 @@ func (m Model) LoadDiff(path string) tea.Cmd {
 			return diffLoadedMsg{file}
 		}
 		return diffLoadedMsg{FileDiff{}}
-	}
+	})
 }
 
 // LoadAllDiffs loads diffs for all changed files at startup
 func (m Model) LoadAllDiffs() tea.Cmd {
-	return func() tea.Msg {
-		if err := m.ensureGitService(); err != nil {
-			return errMsg{err}
-		}
-
+	return m.withGitService(func() tea.Msg {
 		files, err := m.git.GetDiffWithContext(m.diffMode, m.diffViewMode, m.diffContext, m.logger)
 		if err != nil {
-			return m.logAndWrapError("Failed to get all diffs", err, map[string]any{
+			return m.logAndWrapError("get all diffs", err, map[string]any{
 				"mode": m.diffMode,
 			})
 		}
 		return allDiffsLoadedMsg{files}
-	}
+	})
 }
 
 // LoadCommitsAhead loads commits ahead of main branch
 func (m Model) LoadCommitsAhead() tea.Cmd {
-	return func() tea.Msg {
-		if err := m.ensureGitService(); err != nil {
-			return errMsg{err}
-		}
-
+	return m.withGitService(func() tea.Msg {
 		commits, err := m.git.GetCommitsAheadOfMain()
 		if err != nil {
-			return m.logAndWrapError("Failed to get commits ahead", err, nil)
+			return m.logAndWrapError("get commits ahead", err, nil)
 		}
 		return commitsLoadedMsg{commits}
-	}
+	})
 }
 
 // LoadCommitDiff loads the diff for a specific commit
 func (m Model) LoadCommitDiff(commitHash string) tea.Cmd {
-	return func() tea.Msg {
-		if err := m.ensureGitService(); err != nil {
-			return errMsg{err}
-		}
-
+	return m.withGitService(func() tea.Msg {
 		files, err := m.git.GetCommitDiff(commitHash, m.logger)
 		if err != nil {
-			return m.logAndWrapError("Failed to get commit diff", err, map[string]any{
+			return m.logAndWrapError("get commit diff", err, map[string]any{
 				"commit": commitHash,
 			})
 		}
 		return allDiffsLoadedMsg{files}
-	}
+	})
 }
 
 // LoadBranchCompareDiff loads a unified diff against default branch.
 func (m Model) LoadBranchCompareDiff(commits []Commit) tea.Cmd {
-	return func() tea.Msg {
-		if err := m.ensureGitService(); err != nil {
-			return errMsg{err}
-		}
-
+	return m.withGitService(func() tea.Msg {
 		files, err := m.git.GetUnifiedBranchCompareDiff(m.diffViewMode, m.diffContext, m.logger)
 		if err != nil {
-			return m.logAndWrapError("Failed to get unified branch compare diff", err, map[string]any{
+			return m.logAndWrapError("get unified branch compare diff", err, map[string]any{
 				"commit_count": len(commits),
 			})
 		}
 
 		return allDiffsLoadedMsg{files}
-	}
-}
-
-// ServiceError represents an error from a service not being initialized
-type ServiceError struct {
-	Message string
-}
-
-func (e *ServiceError) Error() string {
-	return e.Message
+	})
 }
 
 // Messages

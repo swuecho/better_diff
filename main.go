@@ -15,30 +15,22 @@ func main() {
 		return
 	}
 
-	// Initialize git service
-	gitService, err := NewGitService()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error initializing git service: %v\n", err)
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
 
-	// Get git root path for logger fallback.
-	gitRootPath := ""
-	if rootPath, err := gitService.GetRootPath(); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: failed to get git root path: %v\n", err)
-	} else {
-		gitRootPath = rootPath
-	}
-
-	// Initialize logger (tries /tmp first, then repo root).
-	logger, err := NewLogger(INFO, gitRootPath)
+func run() error {
+	gitService, err := NewGitService()
 	if err != nil {
-		// Log the error but continue - logger will fall back to stderr
-		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+		return fmt.Errorf("initialize git service: %w", err)
 	}
+
+	logger := initLogger(gitService)
 	defer func() {
-		if err := logger.Close(); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to close logger: %v\n", err)
+		if closeErr := logger.Close(); closeErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: close logger: %v\n", closeErr)
 		}
 	}()
 
@@ -46,56 +38,60 @@ func main() {
 		"version": appVersion,
 	})
 
-	// Create model with dependency injection
-	model := NewModel(gitService, logger)
-
-	// Create program
-	p := tea.NewProgram(
-		model,
-		tea.WithAltScreen(),       // Use alternate screen
-		tea.WithMouseCellMotion(), // Enable mouse support
+	program := tea.NewProgram(
+		NewModel(gitService, logger),
+		tea.WithAltScreen(),
+		tea.WithMouseCellMotion(),
 	)
 
-	// Start program
-	if _, err := p.Run(); err != nil {
-		logger.Error("Program error", err, nil)
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+	if _, err := program.Run(); err != nil {
+		logger.Error("program error", err, nil)
+		return fmt.Errorf("run program: %w", err)
 	}
 
-	// Log any errors that occurred
-	if logger.HasErrors() {
-		stats := logger.GetStats()
-		fmt.Fprintf(os.Stderr, "\nCompleted with %d error(s)\n", stats.TotalErrors)
-		if stats.TotalWarnings > 0 {
-			fmt.Fprintf(os.Stderr, "Warnings: %d\n", stats.TotalWarnings)
-		}
+	reportLoggerStats(logger)
+	return nil
+}
+
+func initLogger(gitService *GitService) *Logger {
+	gitRootPath, err := gitService.GetRootPath()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: get git root path: %v\n", err)
+		gitRootPath = ""
+	}
+
+	logger, err := NewLogger(INFO, gitRootPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+	}
+	return logger
+}
+
+func reportLoggerStats(logger *Logger) {
+	if !logger.HasErrors() {
+		return
+	}
+
+	stats := logger.GetStats()
+	fmt.Fprintf(os.Stderr, "\ncompleted with %d error(s)\n", stats.TotalErrors)
+	if stats.TotalWarnings > 0 {
+		fmt.Fprintf(os.Stderr, "warnings: %d\n", stats.TotalWarnings)
 	}
 }
 
 func handleCLIArgs(args []string) bool {
-	if len(args) == 0 {
+	if !shouldPrintVersion(args) {
 		return false
 	}
-
-	if shouldPrintVersion(args) {
-		printVersion()
-		return true
-	}
-
-	return false
+	printVersion()
+	return true
 }
 
 func shouldPrintVersion(args []string) bool {
 	if len(args) == 0 {
 		return false
 	}
-
-	if isHelpArg(args[0]) {
-		return true
-	}
-
-	return len(args) >= 2 && strings.EqualFold(args[0], "diff") && isHelpArg(args[1])
+	return isHelpArg(args[0]) || (len(args) >= 2 && strings.EqualFold(args[0], "diff") && isHelpArg(args[1]))
 }
 
 func printVersion() {

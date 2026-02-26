@@ -26,6 +26,13 @@ type Watcher struct {
 	isWatching bool
 }
 
+const watcherDebounceDelay = 50 * time.Millisecond
+
+var (
+	errWatcherNotRunning = errors.New("watcher is not running")
+	errWatcherClosed     = errors.New("watcher closed")
+)
+
 // NewWatcher creates a new file system watcher
 func NewWatcher(rootPath string) (*Watcher, error) {
 	fsWatcher, err := fsnotify.NewWatcher()
@@ -48,8 +55,8 @@ func NewWatcher(rootPath string) (*Watcher, error) {
 		return nil, fmt.Errorf("initialize watcher: %w", err)
 	}
 
-	// Add key .git directories to watch
-	dirsToWatch := []string{
+	// Add key .git paths to watch.
+	gitPathsToWatch := []string{
 		w.gitPath,
 		filepath.Join(w.gitPath, "HEAD"),
 		filepath.Join(w.gitPath, "index"),
@@ -58,13 +65,8 @@ func NewWatcher(rootPath string) (*Watcher, error) {
 		filepath.Join(w.gitPath, "refs", "tags"),
 	}
 
-	for _, dir := range dirsToWatch {
-		if _, err := os.Stat(dir); err == nil {
-			if err := fsWatcher.Add(dir); err != nil {
-				// Try to add, ignore errors for individual paths
-				continue
-			}
-		}
+	for _, path := range gitPathsToWatch {
+		addWatchPathIfExists(fsWatcher, path)
 	}
 
 	w.isWatching = true
@@ -75,7 +77,7 @@ func NewWatcher(rootPath string) (*Watcher, error) {
 func (w *Watcher) WaitForChange() tea.Cmd {
 	return func() tea.Msg {
 		if !w.isWatching {
-			return errMsg{errors.New("watcher is not running")}
+			return errMsg{errWatcherNotRunning}
 		}
 
 		// Wait for an event
@@ -83,32 +85,52 @@ func (w *Watcher) WaitForChange() tea.Cmd {
 			select {
 			case event, ok := <-w.watcher.Events:
 				if !ok {
-					return errMsg{errors.New("watcher closed")}
+					return errMsg{errWatcherClosed}
 				}
 
-				// Filter for relevant events
-				if event.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Remove|fsnotify.Rename) != 0 {
-					// Track newly created directories so deep file changes are observed.
-					if event.Op&fsnotify.Create != 0 {
-						if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
-							if err := w.addRecursiveDirs(event.Name); err != nil {
-								// Best effort: keep existing watch state even if this directory cannot be added.
-							}
-						}
-					}
-					// Add a small debounce to handle rapid changes
-					time.Sleep(50 * time.Millisecond)
-					return FSChangeMsg{time: time.Now()}
+				if !isRelevantWatchEvent(event.Op) {
+					continue
 				}
+				w.trackCreatedDirectory(event)
+				time.Sleep(watcherDebounceDelay)
+				return FSChangeMsg{time: time.Now()}
 
 			case err, ok := <-w.watcher.Errors:
 				if !ok {
-					return errMsg{errors.New("watcher closed")}
+					return errMsg{errWatcherClosed}
 				}
 				return errMsg{err}
 			}
 		}
 	}
+}
+
+func addWatchPathIfExists(fsWatcher *fsnotify.Watcher, path string) {
+	if _, err := os.Stat(path); err != nil {
+		return
+	}
+	if err := fsWatcher.Add(path); err != nil {
+		// Best effort: ignore individual path failures.
+		return
+	}
+}
+
+func isRelevantWatchEvent(op fsnotify.Op) bool {
+	return op&(fsnotify.Create|fsnotify.Write|fsnotify.Remove|fsnotify.Rename) != 0
+}
+
+func (w *Watcher) trackCreatedDirectory(event fsnotify.Event) {
+	if event.Op&fsnotify.Create == 0 {
+		return
+	}
+
+	info, err := os.Stat(event.Name)
+	if err != nil || !info.IsDir() {
+		return
+	}
+
+	// Best effort: keep existing watch state even if this directory cannot be added.
+	_ = w.addRecursiveDirs(event.Name)
 }
 
 // Close closes the file system watcher

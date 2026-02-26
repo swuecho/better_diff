@@ -93,23 +93,11 @@ func (m Model) renderContent(height int) string {
 
 func (m Model) renderFileTree(width, height int) string {
 	selectedStyle := fileTreeSelectedLineStyle.Width(max(0, width-2))
-
-	// Calculate internal content height
-	internalHeight := height - 2
-	if internalHeight < 0 {
-		internalHeight = 0
-	}
+	internalHeight := panelContentHeight(height)
 
 	// Get visible nodes
 	flatTree := m.flattenTree()
-	start := m.scrollOffset
-	end := min(start+internalHeight, len(flatTree))
-	if start > len(flatTree) {
-		start = len(flatTree)
-	}
-	if end > len(flatTree) {
-		end = len(flatTree)
-	}
+	start, end := visibleRange(m.scrollOffset, internalHeight, len(flatTree))
 	visibleNodes := flatTree[start:end]
 
 	// Render each node
@@ -205,65 +193,12 @@ func (m Model) renderDiffPanel(width, height int) string {
 		allLines = append(allLines, panelInfoStyle.Render(msg))
 	} else {
 		for fileIdx, selectedFile := range filesToRender {
-			if fileIdx > 0 {
-				allLines = append(allLines, "")
-				allLines = append(allLines, diffHunkStyle.Render("════════════════════════════════════"))
-			}
-
-			// Add file path header
-			allLines = append(allLines, diffFileHeaderStyle.Render("📄 "+selectedFile.Path))
-
-			if len(selectedFile.Hunks) == 0 {
-				// File has no hunks (binary file or no changes)
-				allLines = append(allLines, panelInfoStyle.Render("No diff content available (binary file or no changes)"))
-			} else {
-				for _, hunk := range selectedFile.Hunks {
-					// Add hunk header
-					allLines = append(allLines, diffHunkStyle.Render("─"))
-
-					for _, diffLine := range hunk.Lines {
-						var prefix string
-						var prefixStyle lipgloss.Style
-						var contentStyle lipgloss.Style
-
-						switch diffLine.Type {
-						case LineAdded:
-							prefix = "+"
-							prefixStyle = diffAddedPrefixStyle
-							contentStyle = diffAddedStyle
-						case LineRemoved:
-							prefix = "-"
-							prefixStyle = diffRemovedPrefixStyle
-							contentStyle = diffRemovedStyle
-						default:
-							prefix = " "
-							prefixStyle = diffContextStyle
-							contentStyle = diffContextStyle
-						}
-
-						// Render prefix and content separately for better styling
-						line := prefixStyle.Render(prefix) + " " + contentStyle.Render(diffLine.Content)
-						allLines = append(allLines, line)
-					}
-				}
-			}
+			allLines = appendRenderedFileDiffLines(allLines, selectedFile, fileIdx > 0)
 		}
 	}
 
-	// Apply scrolling
-	internalHeight := height - 2 // Account for borders
-	if internalHeight < 0 {
-		internalHeight = 0
-	}
-
-	start := m.diffScroll
-	if start < 0 {
-		start = 0
-	}
-	if start > len(allLines) {
-		start = len(allLines)
-	}
-	end := min(start+internalHeight, len(allLines))
+	internalHeight := panelContentHeight(height)
+	start, end := visibleRange(m.diffScroll, internalHeight, len(allLines))
 
 	var lines []string
 	if start < len(allLines) && end > start {
@@ -280,6 +215,51 @@ func (m Model) renderDiffPanel(width, height int) string {
 
 	// Apply panel styling with border
 	return m.renderPanel(content, width, height, m.panel == DiffPanel)
+}
+
+func appendRenderedFileDiffLines(lines []string, file *FileDiff, withSeparator bool) []string {
+	if withSeparator {
+		lines = append(lines, "")
+		lines = append(lines, diffHunkStyle.Render("════════════════════════════════════"))
+	}
+
+	lines = append(lines, diffFileHeaderStyle.Render("📄 "+file.Path))
+	if len(file.Hunks) == 0 {
+		return append(lines, panelInfoStyle.Render("No diff content available (binary file or no changes)"))
+	}
+
+	for _, hunk := range file.Hunks {
+		lines = append(lines, diffHunkStyle.Render("─"))
+		for _, diffLine := range hunk.Lines {
+			lines = append(lines, renderDiffLine(diffLine))
+		}
+	}
+	return lines
+}
+
+func renderDiffLine(diffLine DiffLine) string {
+	var (
+		prefix       string
+		prefixStyle  lipgloss.Style
+		contentStyle lipgloss.Style
+	)
+
+	switch diffLine.Type {
+	case LineAdded:
+		prefix = "+"
+		prefixStyle = diffAddedPrefixStyle
+		contentStyle = diffAddedStyle
+	case LineRemoved:
+		prefix = "-"
+		prefixStyle = diffRemovedPrefixStyle
+		contentStyle = diffRemovedStyle
+	default:
+		prefix = " "
+		prefixStyle = diffContextStyle
+		contentStyle = diffContextStyle
+	}
+
+	return prefixStyle.Render(prefix) + " " + contentStyle.Render(diffLine.Content)
 }
 
 func (m Model) renderFooter() string {
@@ -315,20 +295,7 @@ func (m Model) renderFooter() string {
 	if m.panel == DiffPanel {
 		totalLines := m.getDiffLineCount()
 		if totalLines > 0 {
-			visibleHeight := m.visibleContentRows()
-
-			maxScroll := max(0, totalLines-visibleHeight)
-			scrollPercent := 100
-			if maxScroll > 0 {
-				scrollPos := m.diffScroll
-				if scrollPos < 0 {
-					scrollPos = 0
-				}
-				if scrollPos > maxScroll {
-					scrollPos = maxScroll
-				}
-				scrollPercent = (scrollPos * 100) / maxScroll
-			}
+			scrollPercent := computeScrollPercent(m.diffScroll, totalLines, m.visibleContentRows())
 			help = append(help, footerScrollStyle.Render(fmt.Sprintf("Scroll: %d%%", scrollPercent)))
 		}
 	}
@@ -340,11 +307,13 @@ func (m Model) renderFooter() string {
 	return footerBaseStyle.Render(strings.Join(help, " • "))
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
+func computeScrollPercent(scrollPos, totalLines, visibleHeight int) int {
+	maxScroll := max(0, totalLines-visibleHeight)
+	if maxScroll == 0 {
+		return 100
 	}
-	return b
+	scrollPos = clamp(scrollPos, 0, maxScroll)
+	return (scrollPos * 100) / maxScroll
 }
 
 func (m Model) diffModeLabel() string {
@@ -397,32 +366,15 @@ func (m Model) renderHelpModal() string {
 // renderCommits renders the list of commits for branch comparison
 func (m Model) renderCommits(width, height int) string {
 	selectedStyle := fileTreeSelectedLineStyle.Width(max(0, width-2))
-
-	// Calculate internal content height
-	internalHeight := height - 2
-	if internalHeight < 0 {
-		internalHeight = 0
-	}
+	internalHeight := panelContentHeight(height)
 
 	// If no commits ahead, show changes summary
 	if len(m.commits) == 0 {
 		var lines []string
 		lines = append(lines, panelInfoStyle.Render("No commits ahead of main"))
 
-		// Show staged/unstaged file count if available
+		// Show changed file count if available.
 		if len(m.diffFiles) > 0 {
-			stagedCount := 0
-			unstagedCount := 0
-
-			// Count files by checking their status
-			for _, f := range m.diffFiles {
-				if f.ChangeType == Added {
-					unstagedCount++
-				} else {
-					stagedCount++
-				}
-			}
-
 			lines = append(lines, "")
 			lines = append(lines, panelInfoStyle.Render(fmt.Sprintf("Changes: %d files", len(m.diffFiles))))
 		}
@@ -432,15 +384,8 @@ func (m Model) renderCommits(width, height int) string {
 		return m.renderPanel(content, width, height, m.panel == FileTreePanel)
 	}
 
-	// Get visible commits
-	start := m.scrollOffset
-	end := min(start+internalHeight, len(m.commits))
-	if start > len(m.commits) {
-		start = len(m.commits)
-	}
-	if end > len(m.commits) {
-		end = len(m.commits)
-	}
+	// Get visible commits.
+	start, end := visibleRange(m.scrollOffset, internalHeight, len(m.commits))
 	visibleCommits := m.commits[start:end]
 
 	// Render each commit

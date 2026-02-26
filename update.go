@@ -4,9 +4,7 @@ import (
 	"fmt"
 	"hash"
 	"hash/fnv"
-	pathpkg "path"
 	"sort"
-	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -46,49 +44,41 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	var cmd tea.Cmd
 	switch key {
 	case "q", "ctrl+c":
-		return m, m.quitCmd()
+		cmd = m.quitCmd()
 	case "up", "k":
 		m.handleUpKey(key)
-		return m, nil
 	case "down", "j":
 		m.handleDownKey(key)
-		return m, nil
 	case "pgup":
 		m.handlePageUp()
-		return m, nil
 	case "pgdown":
 		m.handlePageDown()
-		return m, nil
 	case "g":
 		m.handleVimTopJump()
-		return m, nil
 	case "G":
 		m.handleVimBottomJump()
-		return m, nil
 	case "tab":
 		m.togglePanel()
-		return m, nil
 	case "enter", " ":
-		if m.panel != FileTreePanel {
-			return m, nil
+		if m.panel == FileTreePanel {
+			cmd = m.selectItem()
 		}
-		return m, m.selectItem()
 	case "s":
-		return m, m.toggleDiffMode()
+		cmd = m.toggleDiffMode()
 	case "f":
-		return m, m.toggleDiffViewMode()
+		cmd = m.toggleDiffViewMode()
 	case "o":
-		return m, m.adjustDiffContext(DefaultDiffContext)
+		cmd = m.adjustDiffContext(DefaultDiffContext)
 	case "O":
-		return m, m.resetDiffContext()
+		cmd = m.resetDiffContext()
 	case "?":
 		m.showHelp = !m.showHelp
-		return m, nil
-	default:
-		return m, nil
 	}
+
+	return m, cmd
 }
 
 func (m *Model) resetPendingVimTopJumpIfNeeded(key string) {
@@ -103,8 +93,8 @@ func (m Model) shouldIgnoreKey(key string) bool {
 
 func (m *Model) quitCmd() tea.Cmd {
 	if m.watcher != nil {
-		if err := m.watcher.Close(); err != nil && m.logger != nil {
-			m.logger.Warn("Failed to close file watcher", map[string]any{"error": err})
+		if err := m.watcher.Close(); err != nil {
+			m.logger.Warn("close file watcher", map[string]any{"error": err})
 		}
 	}
 	m.quitting = true
@@ -228,33 +218,30 @@ func (m Model) handleAsyncMsg(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleFSChange()
 	case filesLoadedMsg:
 		m.applyFilesLoaded(typed)
-		return m, nil
 	case allDiffsLoadedMsg:
 		m.applyAllDiffsLoaded(typed)
-		return m, nil
 	case commitsLoadedMsg:
 		m.applyCommitsLoaded(typed)
-		return m, nil
 	case filesChangedMsg:
 		return m.handleFilesChanged(typed)
 	case diffLoadedMsg:
 		m.upsertLoadedDiff(typed.file)
-		return m, nil
 	case ShowHelpMsg:
 		m.showHelp = true
-		return m, nil
 	case HideHelpMsg:
 		m.showHelp = false
-		return m, nil
 	case errMsg:
 		m.err = typed.err
-		return m, nil
 	case clearErrorMsg:
 		m.err = nil
-		return m, nil
 	default:
-		return m, nil
 	}
+
+	return m, nil
+}
+
+func (m Model) loadBranchCompareData() tea.Cmd {
+	return tea.Batch(m.LoadCommitsAhead(), m.LoadBranchCompareDiff(m.commits))
 }
 
 func (m Model) handleGitInfoLoaded(msg gitInfoMsg) (tea.Model, tea.Cmd) {
@@ -263,9 +250,7 @@ func (m Model) handleGitInfoLoaded(msg gitInfoMsg) (tea.Model, tea.Cmd) {
 
 	watcher, err := NewWatcher(m.rootPath)
 	if err != nil {
-		if m.logger != nil {
-			m.logger.Warn("Failed to create file watcher", map[string]any{"error": err})
-		}
+		m.logger.Warn("create file watcher", map[string]any{"error": err})
 		return m, nil
 	}
 
@@ -324,11 +309,7 @@ func (m Model) handleFilesChanged(msg filesChangedMsg) (tea.Model, tea.Cmd) {
 		m.buildFileTree()
 	}
 	m.diffFiles = nil
-
-	if m.diffMode == BranchCompare {
-		return m, tea.Batch(m.LoadCommitsAhead(), m.LoadBranchCompareDiff(m.commits))
-	}
-	return m, m.LoadAllDiffs()
+	return m, m.reloadDiffsForCurrentMode()
 }
 
 func (m *Model) upsertLoadedDiff(file FileDiff) {
@@ -473,13 +454,6 @@ func (m Model) visibleContentRows() int {
 		rows = 1
 	}
 	return rows
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 // getDiffLineCount returns the total number of lines in the current diff
@@ -762,29 +736,6 @@ func buildTreeNodesWithSummary(dir *dirNode, depth int) ([]TreeNode, int, int, C
 	return nodes, totalAdded, totalRemoved, changeType
 }
 
-func splitPath(path string) []string {
-	rawParts := strings.Split(path, "/")
-	parts := make([]string, 0, len(rawParts))
-	for _, part := range rawParts {
-		if part != "" {
-			parts = append(parts, part)
-		}
-	}
-	return parts
-}
-
-func joinPath(parts []string) string {
-	return strings.Join(parts, "/")
-}
-
-func getFileName(path string) string {
-	name := pathpkg.Base(path)
-	if name != "." && name != "/" && name != "" {
-		return name
-	}
-	return path
-}
-
 func nextDiffMode(mode DiffMode) DiffMode {
 	switch mode {
 	case Unstaged:
@@ -815,7 +766,7 @@ func (m Model) reloadByDiffMode() tea.Cmd {
 
 func (m Model) reloadDiffsForCurrentMode() tea.Cmd {
 	if m.diffMode == BranchCompare {
-		return tea.Batch(m.LoadCommitsAhead(), m.LoadBranchCompareDiff(m.commits))
+		return m.loadBranchCompareData()
 	}
 	return m.LoadAllDiffs()
 }
@@ -839,17 +790,13 @@ func (m Model) checkForChanges() tea.Cmd {
 func (m Model) checkBranchCompareChanges() tea.Msg {
 	commits, err := m.git.GetCommitsAheadOfMain()
 	if err != nil {
-		if m.logger != nil {
-			m.logger.Error("Failed to check commits in branch compare", err, nil)
-		}
+		m.logger.Error("check commits in branch compare", err, nil)
 		return nil
 	}
 
 	unifiedDiffs, err := m.git.GetUnifiedBranchCompareDiff(m.diffViewMode, m.diffContext, m.logger)
 	if err != nil {
-		if m.logger != nil {
-			m.logger.Error("Failed to check unified branch compare diff", err, nil)
-		}
+		m.logger.Error("check unified branch compare diff", err, nil)
 		return nil
 	}
 
@@ -865,21 +812,17 @@ func (m Model) checkBranchCompareChanges() tea.Msg {
 func (m Model) checkWorkingTreeChanges() tea.Msg {
 	files, err := m.git.GetChangedFiles(m.diffMode)
 	if err != nil {
-		if m.logger != nil {
-			m.logger.Error("Failed to check file list for changes", err, map[string]any{
-				"mode": m.diffMode,
-			})
-		}
+		m.logger.Error("check file list for changes", err, map[string]any{
+			"mode": m.diffMode,
+		})
 		return nil
 	}
 
 	diffs, err := m.git.GetDiffWithContext(m.diffMode, m.diffViewMode, m.diffContext, m.logger)
 	if err != nil {
-		if m.logger != nil {
-			m.logger.Error("Failed to check diff content for changes", err, map[string]any{
-				"mode": m.diffMode,
-			})
-		}
+		m.logger.Error("check diff content for changes", err, map[string]any{
+			"mode": m.diffMode,
+		})
 		return nil
 	}
 
@@ -893,10 +836,6 @@ func (m Model) checkWorkingTreeChanges() tea.Msg {
 }
 
 func (m Model) logChangeDetected(newHash string, extra map[string]any) {
-	if m.logger == nil {
-		return
-	}
-
 	fields := map[string]any{
 		"previous_hash": m.lastFileHash,
 		"new_hash":      newHash,
@@ -905,7 +844,7 @@ func (m Model) logChangeDetected(newHash string, extra map[string]any) {
 		fields[k] = v
 	}
 
-	m.logger.Info("Repository changes detected", fields)
+	m.logger.Info("repository changes detected", fields)
 }
 
 // computeFileHash creates a simple hash string from the list of files

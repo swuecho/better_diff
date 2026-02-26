@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bytes"
-	"io"
 	"strings"
 
 	"github.com/sergi/go-diff/diffmatchpatch"
@@ -98,26 +96,7 @@ func computeHunks(oldLines, newLines []string) ([]Hunk, error) {
 
 	normalized := make([]Hunk, 0, len(hunks))
 	for _, h := range hunks {
-		leadCtx := 0
-		for _, l := range h.Lines {
-			if l.Type != LineContext {
-				break
-			}
-			leadCtx++
-		}
-
-		if leadCtx > 0 {
-			h.Lines = h.Lines[leadCtx:]
-			h.OldStart += leadCtx
-			h.NewStart += leadCtx
-			if h.OldCount >= leadCtx {
-				h.OldCount -= leadCtx
-			}
-			if h.NewCount >= leadCtx {
-				h.NewCount -= leadCtx
-			}
-		}
-
+		h = trimLeadingContext(h)
 		normalized = append(normalized, h)
 	}
 
@@ -207,26 +186,11 @@ func computeHunksWithContext(oldLines, newLines []string, contextLines int) ([]H
 				}
 
 				// Check if we should close the hunk and split around large unchanged regions.
-				trailingContext := 0
-				for i := len(currentHunk.Lines) - 1; i >= 0; i-- {
-					if currentHunk.Lines[i].Type == LineContext {
-						trailingContext++
-					} else {
-						break
-					}
-				}
+				trailingContext := countTrailingContextLines(currentHunk.Lines)
 
 				// Only close if we have actual changes and enough context
 				if trailingContext >= contextLines {
-					hasChanges := false
-					for _, l := range currentHunk.Lines {
-						if l.Type != LineContext {
-							hasChanges = true
-							break
-						}
-					}
-
-					if hasChanges {
+					if hunkHasChanges(currentHunk.Lines) {
 						trimCount := 0
 						// Trim to keep only contextLines lines of trailing context
 						if trailingContext > contextLines {
@@ -240,15 +204,7 @@ func computeHunksWithContext(oldLines, newLines []string, contextLines int) ([]H
 						currentHunk = nil
 
 						// Keep tail context as potential leading context for the next hunk.
-						if contextLines > 0 {
-							if len(diff.Lines) > contextLines {
-								pendingEqual = append([]string(nil), diff.Lines[len(diff.Lines)-contextLines:]...)
-							} else {
-								pendingEqual = append([]string(nil), diff.Lines...)
-							}
-						} else {
-							pendingEqual = pendingEqual[:0]
-						}
+						pendingEqual = tailContextLines(diff.Lines, contextLines)
 					}
 				}
 			} else {
@@ -257,7 +213,7 @@ func computeHunksWithContext(oldLines, newLines []string, contextLines int) ([]H
 				if contextLines > 0 {
 					pendingEqual = append(pendingEqual, diff.Lines...)
 					if len(pendingEqual) > contextLines {
-						pendingEqual = append([]string(nil), pendingEqual[len(pendingEqual)-contextLines:]...)
+						pendingEqual = tailContextLines(pendingEqual, contextLines)
 					}
 				} else {
 					pendingEqual = pendingEqual[:0]
@@ -266,21 +222,7 @@ func computeHunksWithContext(oldLines, newLines []string, contextLines int) ([]H
 
 		case diffmatchpatch.DiffDelete:
 			if currentHunk == nil {
-				leadingContext := pendingEqual
-				if contextLines <= 0 {
-					leadingContext = nil
-				}
-				currentHunk = &Hunk{
-					Lines:    make([]DiffLine, 0, len(leadingContext)+len(diff.Lines)),
-					OldStart: oldLineNum - len(leadingContext),
-					NewStart: newLineNum - len(leadingContext),
-				}
-				for _, line := range leadingContext {
-					currentHunk.Lines = append(currentHunk.Lines, DiffLine{
-						Type:    LineContext,
-						Content: line,
-					})
-				}
+				currentHunk = newHunkWithLeadingContext(pendingEqual, contextLines, oldLineNum, newLineNum, len(diff.Lines))
 				pendingEqual = pendingEqual[:0]
 			}
 
@@ -294,21 +236,7 @@ func computeHunksWithContext(oldLines, newLines []string, contextLines int) ([]H
 
 		case diffmatchpatch.DiffInsert:
 			if currentHunk == nil {
-				leadingContext := pendingEqual
-				if contextLines <= 0 {
-					leadingContext = nil
-				}
-				currentHunk = &Hunk{
-					Lines:    make([]DiffLine, 0, len(leadingContext)+len(diff.Lines)),
-					OldStart: oldLineNum - len(leadingContext),
-					NewStart: newLineNum - len(leadingContext),
-				}
-				for _, line := range leadingContext {
-					currentHunk.Lines = append(currentHunk.Lines, DiffLine{
-						Type:    LineContext,
-						Content: line,
-					})
-				}
+				currentHunk = newHunkWithLeadingContext(pendingEqual, contextLines, oldLineNum, newLineNum, len(diff.Lines))
 				pendingEqual = pendingEqual[:0]
 			}
 
@@ -328,14 +256,7 @@ func computeHunksWithContext(oldLines, newLines []string, contextLines int) ([]H
 		currentHunk.NewCount = newLineNum - currentHunk.NewStart
 
 		// Trim trailing context
-		trailingContext := 0
-		for i := len(currentHunk.Lines) - 1; i >= 0; i-- {
-			if currentHunk.Lines[i].Type == LineContext {
-				trailingContext++
-			} else {
-				break
-			}
-		}
+		trailingContext := countTrailingContextLines(currentHunk.Lines)
 
 		if trailingContext > contextLines {
 			trimCount := trailingContext - contextLines
@@ -348,6 +269,83 @@ func computeHunksWithContext(oldLines, newLines []string, contextLines int) ([]H
 	}
 
 	return hunks, nil
+}
+
+func trimLeadingContext(h Hunk) Hunk {
+	leadCtx := 0
+	for _, line := range h.Lines {
+		if line.Type != LineContext {
+			break
+		}
+		leadCtx++
+	}
+
+	if leadCtx == 0 {
+		return h
+	}
+
+	h.Lines = h.Lines[leadCtx:]
+	h.OldStart += leadCtx
+	h.NewStart += leadCtx
+	if h.OldCount >= leadCtx {
+		h.OldCount -= leadCtx
+	}
+	if h.NewCount >= leadCtx {
+		h.NewCount -= leadCtx
+	}
+	return h
+}
+
+func countTrailingContextLines(lines []DiffLine) int {
+	count := 0
+	for i := len(lines) - 1; i >= 0; i-- {
+		if lines[i].Type != LineContext {
+			break
+		}
+		count++
+	}
+	return count
+}
+
+func hunkHasChanges(lines []DiffLine) bool {
+	for _, line := range lines {
+		if line.Type != LineContext {
+			return true
+		}
+	}
+	return false
+}
+
+func tailContextLines(lines []string, contextLines int) []string {
+	if contextLines <= 0 {
+		return nil
+	}
+	if len(lines) <= contextLines {
+		return append([]string(nil), lines...)
+	}
+	return append([]string(nil), lines[len(lines)-contextLines:]...)
+}
+
+func newHunkWithLeadingContext(pendingEqual []string, contextLines int, oldLineNum, newLineNum, diffLineCount int) *Hunk {
+	leadingContext := pendingEqual
+	if contextLines <= 0 {
+		leadingContext = nil
+	}
+
+	hunk := &Hunk{
+		Lines:    make([]DiffLine, 0, len(leadingContext)+diffLineCount),
+		OldStart: oldLineNum - len(leadingContext),
+		NewStart: newLineNum - len(leadingContext),
+	}
+
+	for _, line := range leadingContext {
+		hunk.Lines = append(hunk.Lines, DiffLine{
+			Type:    LineContext,
+			Content: line,
+		})
+	}
+
+	return hunk
 }
 
 func joinLinesForDiff(lines []string) string {
@@ -373,14 +371,4 @@ func splitLines(content string) []string {
 	}
 
 	return lines
-}
-
-// readAll reads all content from an io.Reader
-func readAll(r io.Reader) ([]byte, error) {
-	b := new(bytes.Buffer)
-	_, err := b.ReadFrom(r)
-	if err != nil {
-		return nil, err
-	}
-	return b.Bytes(), nil
 }
