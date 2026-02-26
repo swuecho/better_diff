@@ -184,37 +184,16 @@ func (gs *GitService) GetDiffWithContext(mode DiffMode, viewMode DiffViewMode, c
 		return nil, fmt.Errorf("logger is required")
 	}
 
-	worktree, err := gs.repo.Worktree()
+	worktree, idx, status, headCommit, err := gs.diffInputs(mode, logger)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get worktree: %w", err)
-	}
-
-	headCommit, shouldSkip, err := gs.getHeadCommitForDiffMode(mode, logger)
-	if err != nil {
+		if errors.Is(err, errSkipDiffLoad) {
+			return []FileDiff{}, nil
+		}
 		return nil, err
 	}
-	if shouldSkip {
-		return []FileDiff{}, nil
-	}
-
-	status, shouldSkip, err := getWorktreeStatusForDiff(worktree, logger)
-	if err != nil {
-		return nil, err
-	}
-	if shouldSkip {
-		return []FileDiff{}, nil
-	}
-
-	var files []FileDiff
 
 	paths := sortedStatusPaths(status)
-
-	// Get the index for staging area contents
-	idx, err := gs.repo.Storer.Index()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get index: %w", err)
-	}
-
+	files := make([]FileDiff, 0, len(paths))
 	for _, path := range paths {
 		fileStatus := status[path]
 		if !isRelevantChange(mode, status, path, fileStatus) {
@@ -237,6 +216,38 @@ func (gs *GitService) GetDiffWithContext(mode DiffMode, viewMode DiffViewMode, c
 	}
 
 	return files, nil
+}
+
+var errSkipDiffLoad = errors.New("skip diff load")
+
+func (gs *GitService) diffInputs(mode DiffMode, logger *Logger) (*git.Worktree, *index.Index, git.Status, *object.Commit, error) {
+	worktree, err := gs.repo.Worktree()
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("failed to get worktree: %w", err)
+	}
+
+	headCommit, shouldSkip, err := gs.getHeadCommitForDiffMode(mode, logger)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	if shouldSkip {
+		return nil, nil, nil, nil, errSkipDiffLoad
+	}
+
+	status, shouldSkip, err := getWorktreeStatusForDiff(worktree, logger)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	if shouldSkip {
+		return nil, nil, nil, nil, errSkipDiffLoad
+	}
+
+	idx, err := gs.repo.Storer.Index()
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("failed to get index: %w", err)
+	}
+
+	return worktree, idx, status, headCommit, nil
 }
 
 func (gs *GitService) getHeadCommitForDiffMode(mode DiffMode, logger *Logger) (*object.Commit, bool, error) {
@@ -280,59 +291,64 @@ func getWorktreeStatusForDiff(worktree *git.Worktree, logger *Logger) (git.Statu
 
 // getFileDiff generates a FileDiff for a single file
 func (gs *GitService) getFileDiff(worktree *git.Worktree, idx *index.Index, headCommit *object.Commit, path string, mode DiffMode, viewMode DiffViewMode, contextLines int, fileStatus git.FileStatus, logger *Logger) (*FileDiff, error) {
-	// Check if this is an untracked file (only in unstaged mode)
-	isUntracked := mode == Unstaged && (fileStatus.Worktree == git.Untracked)
-
-	var oldContent, newContent []byte
-	var err error
 	changeType := statusCodeToChangeType(statusCodeForMode(mode, fileStatus))
-
-	if isUntracked {
-		// For untracked files, show full file content as "new"
-		changeType = Added
-		newContent, err = gs.readRequiredWorktreeContent(path, worktree, logger)
-		if err != nil {
-			return nil, err
-		}
-	} else if mode == Staged {
-		oldContent, newContent, err = gs.readStagedContents(path, idx, headCommit, logger)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		oldContent, newContent, err = gs.readUnstagedContents(path, idx, worktree, logger)
-		if err != nil {
-			return nil, err
-		}
+	oldContent, newContent, resolvedChangeType, err := gs.loadDiffContents(path, mode, fileStatus, idx, headCommit, worktree, logger)
+	if err != nil {
+		return nil, err
 	}
+	changeType = resolvedChangeType
 
-	// Generate diff patch using text diff
-	fileDiff := &FileDiff{
-		Path:         path,
-		ChangeType:   changeType,
-		Hunks:        []Hunk{},
-		LinesAdded:   0,
-		LinesRemoved: 0,
-	}
-
-	// Generate hunks from diff
-	oldLines := splitLines(string(oldContent))
-	newLines := splitLines(string(newContent))
-
-	effectiveContext := contextLines
-	if viewMode == WholeFile {
-		effectiveContext = WholeFileContext
-	}
-
-	hunks, err := computeHunksWithContext(oldLines, newLines, effectiveContext)
+	hunks, err := computeHunksWithContext(
+		splitLines(string(oldContent)),
+		splitLines(string(newContent)),
+		effectiveContextLines(viewMode, contextLines),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compute diff for %s: %w", path, err)
 	}
-	fileDiff.Hunks = hunks
 
-	fileDiff.LinesAdded, fileDiff.LinesRemoved = countHunkLineStats(hunks)
+	linesAdded, linesRemoved := countHunkLineStats(hunks)
+	return &FileDiff{
+		Path:         path,
+		ChangeType:   changeType,
+		Hunks:        hunks,
+		LinesAdded:   linesAdded,
+		LinesRemoved: linesRemoved,
+	}, nil
+}
 
-	return fileDiff, nil
+func effectiveContextLines(viewMode DiffViewMode, contextLines int) int {
+	if viewMode == WholeFile {
+		return WholeFileContext
+	}
+	return contextLines
+}
+
+func (gs *GitService) loadDiffContents(path string, mode DiffMode, fileStatus git.FileStatus, idx *index.Index, headCommit *object.Commit, worktree *git.Worktree, logger *Logger) ([]byte, []byte, ChangeType, error) {
+	// Check if this is an untracked file (only in unstaged mode).
+	isUntracked := mode == Unstaged && fileStatus.Worktree == git.Untracked
+	if isUntracked {
+		newContent, err := gs.readRequiredWorktreeContent(path, worktree, logger)
+		if err != nil {
+			return nil, nil, Modified, err
+		}
+		return nil, newContent, Added, nil
+	}
+
+	changeType := statusCodeToChangeType(statusCodeForMode(mode, fileStatus))
+	if mode == Staged {
+		oldContent, newContent, err := gs.readStagedContents(path, idx, headCommit, logger)
+		if err != nil {
+			return nil, nil, Modified, err
+		}
+		return oldContent, newContent, changeType, nil
+	}
+
+	oldContent, newContent, err := gs.readUnstagedContents(path, idx, worktree, logger)
+	if err != nil {
+		return nil, nil, Modified, err
+	}
+	return oldContent, newContent, changeType, nil
 }
 
 func (gs *GitService) readRequiredWorktreeContent(path string, worktree *git.Worktree, logger *Logger) ([]byte, error) {
@@ -518,27 +534,9 @@ func (gs *GitService) GetCommitsAheadOfMain() ([]Commit, error) {
 		return []Commit{}, nil
 	}
 
-	// Get current branch reference
-	currentRef, err := gs.repo.Reference(plumbing.ReferenceName("refs/heads/"+currentBranch), true)
+	currentCommit, defaultCommit, err := gs.resolveBranchHeadCommits(currentBranch, defaultBranch)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get current branch reference: %w", err)
-	}
-
-	// Get default branch reference.
-	defaultRef, err := gs.findBranchReference(defaultBranch)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get default branch reference: %w", err)
-	}
-
-	// Get commit objects
-	currentCommit, err := gs.repo.CommitObject(currentRef.Hash())
-	if err != nil {
-		return nil, fmt.Errorf("failed to get current commit: %w", err)
-	}
-
-	defaultCommit, err := gs.repo.CommitObject(defaultRef.Hash())
-	if err != nil {
-		return nil, fmt.Errorf("failed to get default commit: %w", err)
+		return nil, err
 	}
 
 	// Get merge base
@@ -547,49 +545,90 @@ func (gs *GitService) GetCommitsAheadOfMain() ([]Commit, error) {
 		return nil, fmt.Errorf("failed to get merge base: %w", err)
 	}
 
-	// Get commits from merge base to current head (exclusive of merge base)
+	commits, foundMergeBase, err := gs.collectCommitsAhead(currentCommit, mergeBase)
+	if err != nil {
+		return nil, err
+	}
+
+	if !foundMergeBase && len(commits) > 50 {
+		// Branches diverged and merge base was not reached in traversal.
+		return commits[:50], nil
+	}
+	return commits, nil
+}
+
+func (gs *GitService) resolveBranchHeadCommits(currentBranch, defaultBranch string) (*object.Commit, *object.Commit, error) {
+	// Get current branch reference.
+	currentRef, err := gs.repo.Reference(plumbing.ReferenceName("refs/heads/"+currentBranch), true)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get current branch reference: %w", err)
+	}
+
+	// Get default branch reference.
+	defaultRef, err := gs.findBranchReference(defaultBranch)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get default branch reference: %w", err)
+	}
+
+	currentCommit, err := gs.repo.CommitObject(currentRef.Hash())
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get current commit: %w", err)
+	}
+
+	defaultCommit, err := gs.repo.CommitObject(defaultRef.Hash())
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get default commit: %w", err)
+	}
+
+	return currentCommit, defaultCommit, nil
+}
+
+func (gs *GitService) collectCommitsAhead(currentCommit, mergeBase *object.Commit) ([]Commit, bool, error) {
+	// Get commits from merge base to current head (exclusive of merge base).
 	commitIter, err := gs.repo.Log(&git.LogOptions{
 		From:  currentCommit.Hash,
 		Order: git.LogOrderCommitterTime,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to get commit log: %w", err)
+		return nil, false, fmt.Errorf("failed to get commit log: %w", err)
 	}
 
 	var commits []Commit
 	foundMergeBase := false
 
-	err = commitIter.ForEach(func(c *object.Commit) error {
+	iterateErr := commitIter.ForEach(func(c *object.Commit) error {
 		if c.Hash.String() == mergeBase.Hash.String() {
 			// Stop when we reach the merge base
 			foundMergeBase = true
 			return errStopCommitIteration
 		}
 
-		commits = append(commits, Commit{
-			Hash:      c.Hash.String(),
-			ShortHash: c.Hash.String()[:7],
-			Author:    c.Author.Name,
-			Message:   getFirstLine(c.Message),
-			Date:      c.Author.When.Format("2006-01-02 15:04"),
-		})
+		commits = append(commits, commitToSummary(c))
 
 		return nil
 	})
 
-	if err != nil && !errors.Is(err, errStopCommitIteration) {
-		return nil, err
+	if iterateErr != nil && !errors.Is(iterateErr, errStopCommitIteration) {
+		return nil, false, iterateErr
 	}
 
-	if !foundMergeBase {
-		// If we didn't find merge base, the branches might have diverged
-		// Return all commits up to a reasonable limit
-		if len(commits) > 50 {
-			commits = commits[:50]
-		}
+	return commits, foundMergeBase, nil
+}
+
+func commitToSummary(commit *object.Commit) Commit {
+	hash := commit.Hash.String()
+	shortHash := hash
+	if len(hash) > 7 {
+		shortHash = hash[:7]
 	}
 
-	return commits, nil
+	return Commit{
+		Hash:      hash,
+		ShortHash: shortHash,
+		Author:    commit.Author.Name,
+		Message:   getFirstLine(commit.Message),
+		Date:      commit.Author.When.Format("2006-01-02 15:04"),
+	}
 }
 
 // getMergeBase finds the merge base of two commits using go-git's graph algorithm.
@@ -649,34 +688,13 @@ func (gs *GitService) GetUnifiedBranchCompareDiff(viewMode DiffViewMode, context
 		return nil, fmt.Errorf("logger is required")
 	}
 
-	worktree, err := gs.repo.Worktree()
+	worktree, baseCommit, paths, effectiveContext, err := gs.branchCompareInputs(viewMode, contextLines, logger)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get worktree: %w", err)
-	}
-
-	headCommit, shouldSkip, err := gs.getHeadCommitForBranchCompare(logger)
-	if err != nil {
-		return nil, err
-	}
-	if shouldSkip {
-		return []FileDiff{}, nil
-	}
-
-	baseCommit, err := gs.getDefaultBranchCommit()
-	if err != nil {
-		if isObjectNotFoundError(err) {
-			logger.Warn("skip branch compare: default branch commit unavailable", nil)
+		if errors.Is(err, errSkipBranchCompare) {
 			return []FileDiff{}, nil
 		}
-		return nil, fmt.Errorf("failed to resolve default branch commit: %w", err)
-	}
-
-	paths, err := gs.collectBranchComparePaths(baseCommit, headCommit, worktree)
-	if err != nil {
 		return nil, err
 	}
-
-	effectiveContext := resolveEffectiveContextLines(viewMode, contextLines)
 
 	files := make([]FileDiff, 0, len(paths))
 	for _, path := range paths {
@@ -691,6 +709,39 @@ func (gs *GitService) GetUnifiedBranchCompareDiff(viewMode DiffViewMode, context
 	}
 
 	return files, nil
+}
+
+var errSkipBranchCompare = errors.New("skip branch compare")
+
+func (gs *GitService) branchCompareInputs(viewMode DiffViewMode, contextLines int, logger *Logger) (*git.Worktree, *object.Commit, []string, int, error) {
+	worktree, err := gs.repo.Worktree()
+	if err != nil {
+		return nil, nil, nil, 0, fmt.Errorf("failed to get worktree: %w", err)
+	}
+
+	headCommit, shouldSkip, err := gs.getHeadCommitForBranchCompare(logger)
+	if err != nil {
+		return nil, nil, nil, 0, err
+	}
+	if shouldSkip {
+		return nil, nil, nil, 0, errSkipBranchCompare
+	}
+
+	baseCommit, err := gs.getDefaultBranchCommit()
+	if err != nil {
+		if isObjectNotFoundError(err) {
+			logger.Warn("skip branch compare: default branch commit unavailable", nil)
+			return nil, nil, nil, 0, errSkipBranchCompare
+		}
+		return nil, nil, nil, 0, fmt.Errorf("failed to resolve default branch commit: %w", err)
+	}
+
+	paths, err := gs.collectBranchComparePaths(baseCommit, headCommit, worktree)
+	if err != nil {
+		return nil, nil, nil, 0, err
+	}
+
+	return worktree, baseCommit, paths, resolveEffectiveContextLines(viewMode, contextLines), nil
 }
 
 func (gs *GitService) getHeadCommitForBranchCompare(logger *Logger) (*object.Commit, bool, error) {
@@ -753,7 +804,7 @@ func (gs *GitService) buildUnifiedBranchCompareFileDiff(path string, baseCommit 
 		return nil, nil
 	}
 
-	hunks, err := computeHunksWithContext(splitLines(string(oldContent)), splitLines(string(newContent)), contextLines)
+	hunks, err := buildUnifiedBranchCompareHunks(oldContent, newContent, contextLines)
 	if err != nil {
 		return nil, err
 	}
@@ -769,6 +820,10 @@ func (gs *GitService) buildUnifiedBranchCompareFileDiff(path string, baseCommit 
 		LinesAdded:   linesAdded,
 		LinesRemoved: linesRemoved,
 	}, nil
+}
+
+func buildUnifiedBranchCompareHunks(oldContent, newContent []byte, contextLines int) ([]Hunk, error) {
+	return computeHunksWithContext(splitLines(string(oldContent)), splitLines(string(newContent)), contextLines)
 }
 
 func (gs *GitService) getDefaultBranchCommit() (*object.Commit, error) {
@@ -792,22 +847,14 @@ func (gs *GitService) getDefaultBranchCommit() (*object.Commit, error) {
 func (gs *GitService) collectBranchComparePaths(baseCommit, headCommit *object.Commit, worktree *git.Worktree) ([]string, error) {
 	pathSet := make(map[string]struct{})
 
-	patch, err := baseCommit.Patch(headCommit)
-	if err != nil {
-		if !isObjectNotFoundError(err) {
-			return nil, fmt.Errorf("failed to compute base..HEAD patch: %w", err)
+	patch, patchErr := baseCommit.Patch(headCommit)
+	if patchErr != nil {
+		if !isObjectNotFoundError(patchErr) {
+			return nil, fmt.Errorf("failed to compute base..HEAD patch: %w", patchErr)
 		}
 		// Fall back to status-only paths when commit patching cannot be computed.
 	} else {
-		for _, filePatch := range patch.FilePatches() {
-			from, to := filePatch.Files()
-			if from != nil && from.Path() != "" {
-				pathSet[from.Path()] = struct{}{}
-			}
-			if to != nil && to.Path() != "" {
-				pathSet[to.Path()] = struct{}{}
-			}
-		}
+		addPathsFromFilePatches(pathSet, patch.FilePatches())
 	}
 
 	status, err := worktree.Status()
@@ -817,13 +864,33 @@ func (gs *GitService) collectBranchComparePaths(baseCommit, headCommit *object.C
 		}
 		return nil, fmt.Errorf("failed to get worktree status: %w", err)
 	}
-	for path, fileStatus := range status {
-		if fileStatus.Staging != git.Unmodified || fileStatus.Worktree != git.Unmodified || status.IsUntracked(path) {
-			pathSet[path] = struct{}{}
-		}
-	}
+	addChangedStatusPaths(pathSet, status)
 
 	return sortedPathsFromSet(pathSet), nil
+}
+
+func addPathsFromFilePatches(pathSet map[string]struct{}, filePatches []diff.FilePatch) {
+	for _, filePatch := range filePatches {
+		from, to := filePatch.Files()
+		addPathIfNotEmpty(pathSet, from)
+		addPathIfNotEmpty(pathSet, to)
+	}
+}
+
+func addPathIfNotEmpty(pathSet map[string]struct{}, file diff.File) {
+	if file == nil || file.Path() == "" {
+		return
+	}
+	pathSet[file.Path()] = struct{}{}
+}
+
+func addChangedStatusPaths(pathSet map[string]struct{}, status git.Status) {
+	for path, fileStatus := range status {
+		if fileStatus.Staging == git.Unmodified && fileStatus.Worktree == git.Unmodified && !status.IsUntracked(path) {
+			continue
+		}
+		pathSet[path] = struct{}{}
+	}
 }
 
 func (gs *GitService) readFileFromCommit(commit *object.Commit, path string, logger *Logger) ([]byte, bool, error) {

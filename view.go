@@ -105,63 +105,7 @@ func (m Model) renderFileTree(width, height int) string {
 	for i, node := range visibleNodes {
 		globalIndex := start + i
 		isSelected := globalIndex == m.selectedIndex
-
-		// Build prefix (indentation)
-		prefix := strings.Repeat("  ", node.depth)
-
-		// Add folder/file indicator
-		if node.isDir {
-			if node.isExpanded {
-				prefix += "▼ "
-			} else {
-				prefix += "▶ "
-			}
-		} else {
-			prefix += "  "
-		}
-
-		text := node.name
-		style := fileStyle
-		if node.isDir {
-			style = dirStyle
-		}
-
-		// Add change indicator
-		var indicator string
-		switch node.changeType {
-		case Modified:
-			indicator = "●"
-			if !node.isDir {
-				style = modifiedStyle
-			}
-		case Added:
-			indicator = "+"
-			if !node.isDir {
-				style = addedStyle
-			}
-		case Deleted:
-			indicator = "-"
-			if !node.isDir {
-				style = deletedStyle
-			}
-		default:
-			indicator = "●"
-		}
-
-		line := prefix + indicator + " " + text
-
-		if !node.isDir && (node.linesAdded > 0 || node.linesRemoved > 0) {
-			stats := formatLineStats(node.linesAdded, node.linesRemoved)
-			line += statsStyle.Render(stats)
-		}
-
-		if isSelected && m.panel == FileTreePanel {
-			line = selectedStyle.Render(line)
-		} else {
-			line = style.Render(line)
-		}
-
-		lines = append(lines, line)
+		lines = append(lines, renderTreeNodeLine(node, isSelected, m.panel == FileTreePanel, selectedStyle))
 	}
 
 	// Build content as a single string
@@ -171,50 +115,101 @@ func (m Model) renderFileTree(width, height int) string {
 	return m.renderPanel(content, width, height, m.panel == FileTreePanel)
 }
 
-func (m Model) renderDiffPanel(width, height int) string {
-	// Get selected file(s).
-	filesToRender := m.getSelectedDiffFiles()
+func renderTreeNodeLine(node TreeNode, isSelected, isTreePanelActive bool, selectedStyle lipgloss.Style) string {
+	indicator, lineStyle := treeNodeIndicatorAndStyle(node)
+	line := treeNodePrefix(node) + indicator + " " + node.name
 
-	// Render all diff lines first
-	var allLines []string
+	if !node.isDir && (node.linesAdded > 0 || node.linesRemoved > 0) {
+		line += statsStyle.Render(formatLineStats(node.linesAdded, node.linesRemoved))
+	}
+
+	if isSelected && isTreePanelActive {
+		return selectedStyle.Render(line)
+	}
+	return lineStyle.Render(line)
+}
+
+func treeNodePrefix(node TreeNode) string {
+	prefix := strings.Repeat("  ", node.depth)
+	if !node.isDir {
+		return prefix + "  "
+	}
+	if node.isExpanded {
+		return prefix + "▼ "
+	}
+	return prefix + "▶ "
+}
+
+func treeNodeIndicatorAndStyle(node TreeNode) (string, lipgloss.Style) {
+	if node.isDir {
+		return treeNodeIndicator(node.changeType), dirStyle
+	}
+
+	switch node.changeType {
+	case Added:
+		return "+", addedStyle
+	case Deleted:
+		return "-", deletedStyle
+	default:
+		return "●", modifiedStyle
+	}
+}
+
+func treeNodeIndicator(changeType ChangeType) string {
+	switch changeType {
+	case Added:
+		return "+"
+	case Deleted:
+		return "-"
+	default:
+		return "●"
+	}
+}
+
+func (m Model) renderDiffPanel(width, height int) string {
+	allLines := m.buildDiffPanelLines()
+	content := strings.Join(visiblePaddedLines(allLines, m.diffScroll, panelContentHeight(height)), "\n")
+
+	// Apply panel styling with border
+	return m.renderPanel(content, width, height, m.panel == DiffPanel)
+}
+
+func (m Model) buildDiffPanelLines() []string {
+	filesToRender := m.getSelectedDiffFiles()
+	lines := make([]string, 0)
 
 	if m.diffMode == BranchCompare {
-		// Add branch compare info header.
-		allLines = append(allLines, diffCommitHeaderStyle.Render("Branch Compare: current working tree vs default branch"))
-		allLines = append(allLines, "")
+		lines = append(lines, diffCommitHeaderStyle.Render("Branch Compare: current working tree vs default branch"), "")
 	}
 
 	if len(filesToRender) == 0 {
-		// No file selected
-		msg := "Select a file to view diff"
-		if m.diffMode == BranchCompare {
-			msg = "Select a file to view unified changes"
-		}
-		allLines = append(allLines, panelInfoStyle.Render(msg))
-	} else {
-		for fileIdx, selectedFile := range filesToRender {
-			allLines = appendRenderedFileDiffLines(allLines, selectedFile, fileIdx > 0)
-		}
+		return append(lines, panelInfoStyle.Render(m.diffPanelEmptyMessage()))
 	}
 
-	internalHeight := panelContentHeight(height)
-	start, end := visibleRange(m.diffScroll, internalHeight, len(allLines))
+	for fileIdx, selectedFile := range filesToRender {
+		lines = appendRenderedFileDiffLines(lines, selectedFile, fileIdx > 0)
+	}
+	return lines
+}
+
+func (m Model) diffPanelEmptyMessage() string {
+	if m.diffMode == BranchCompare {
+		return "Select a file to view unified changes"
+	}
+	return "Select a file to view diff"
+}
+
+func visiblePaddedLines(allLines []string, scrollOffset, height int) []string {
+	start, end := visibleRange(scrollOffset, height, len(allLines))
 
 	var lines []string
 	if start < len(allLines) && end > start {
 		lines = allLines[start:end]
 	}
-
-	// Pad to exact content height
-	for len(lines) < internalHeight {
+	for len(lines) < height {
 		lines = append(lines, "")
 	}
-
-	// Build content as a single string
-	content := strings.Join(lines, "\n")
-
-	// Apply panel styling with border
-	return m.renderPanel(content, width, height, m.panel == DiffPanel)
+	return lines
 }
 
 func appendRenderedFileDiffLines(lines []string, file *FileDiff, withSeparator bool) []string {
@@ -263,48 +258,67 @@ func renderDiffLine(diffLine DiffLine) string {
 }
 
 func (m Model) renderFooter() string {
-	// Build contextual help text to reduce footer overload.
-	help := []string{}
-
-	if m.panel == FileTreePanel {
-		help = append(help, footerKeyStyle.Render("[↑↓/j/k]")+" Navigate")
-		help = append(help, footerKeyStyle.Render("[PgUp/PgDn]")+" Page")
-		help = append(help, footerKeyStyle.Render("[Enter]")+" Select/Expand")
-	} else {
-		help = append(help, footerKeyStyle.Render("[↑↓]")+" Scroll")
-		help = append(help, footerKeyStyle.Render("[PgUp/PgDn]")+" Page")
-		if m.diffViewMode == DiffOnly {
-			help = append(help, footerKeyStyle.Render("[j/k]")+" Hunk Jump")
-		} else {
-			help = append(help, footerKeyStyle.Render("[j/k]")+" Scroll")
-		}
-		help = append(help, footerKeyStyle.Render("[gg/G]")+" Top/Bottom")
-	}
-
-	if m.diffViewMode == DiffOnly {
-		help = append(help, footerKeyStyle.Render("[o/O]")+" Expand/Reset")
-		help = append(help, footerKeyStyle.Render("[Tab]")+" Switch Panel")
-	}
-
-	help = append(help, footerKeyStyle.Render("[s]")+" Mode")
-	help = append(help, footerKeyStyle.Render("[f]")+" Diff/Whole File")
-	help = append(help, footerKeyStyle.Render("[?]")+" Help")
-	help = append(help, footerKeyStyle.Render("[q]")+" Quit")
-
-	// Add scroll indicator for diff panel
-	if m.panel == DiffPanel {
-		totalLines := m.getDiffLineCount()
-		if totalLines > 0 {
-			scrollPercent := computeScrollPercent(m.diffScroll, totalLines, m.visibleContentRows())
-			help = append(help, footerScrollStyle.Render(fmt.Sprintf("Scroll: %d%%", scrollPercent)))
-		}
-	}
-
-	if m.err != nil {
-		help = append(help, errorStyle.Render("Error: "+m.err.Error()))
-	}
-
+	help := m.footerHelpItems()
+	help = m.appendFooterScroll(help)
+	help = m.appendFooterError(help)
 	return footerBaseStyle.Render(strings.Join(help, " • "))
+}
+
+func (m Model) footerHelpItems() []string {
+	help := m.contextualFooterHelp()
+	if m.diffViewMode == DiffOnly {
+		help = append(help,
+			footerKeyStyle.Render("[o/O]")+" Expand/Reset",
+			footerKeyStyle.Render("[Tab]")+" Switch Panel",
+		)
+	}
+	return append(help,
+		footerKeyStyle.Render("[s]")+" Mode",
+		footerKeyStyle.Render("[f]")+" Diff/Whole File",
+		footerKeyStyle.Render("[?]")+" Help",
+		footerKeyStyle.Render("[q]")+" Quit",
+	)
+}
+
+func (m Model) contextualFooterHelp() []string {
+	if m.panel == FileTreePanel {
+		return []string{
+			footerKeyStyle.Render("[↑↓/j/k]") + " Navigate",
+			footerKeyStyle.Render("[PgUp/PgDn]") + " Page",
+			footerKeyStyle.Render("[Enter]") + " Select/Expand",
+		}
+	}
+
+	diffNavigationLabel := "Scroll"
+	if m.diffViewMode == DiffOnly {
+		diffNavigationLabel = "Hunk Jump"
+	}
+	return []string{
+		footerKeyStyle.Render("[↑↓]") + " Scroll",
+		footerKeyStyle.Render("[PgUp/PgDn]") + " Page",
+		footerKeyStyle.Render("[j/k]") + " " + diffNavigationLabel,
+		footerKeyStyle.Render("[gg/G]") + " Top/Bottom",
+	}
+}
+
+func (m Model) appendFooterScroll(help []string) []string {
+	if m.panel != DiffPanel {
+		return help
+	}
+	totalLines := m.getDiffLineCount()
+	if totalLines == 0 {
+		return help
+	}
+
+	scrollPercent := computeScrollPercent(m.diffScroll, totalLines, m.visibleContentRows())
+	return append(help, footerScrollStyle.Render(fmt.Sprintf("Scroll: %d%%", scrollPercent)))
+}
+
+func (m Model) appendFooterError(help []string) []string {
+	if m.err == nil {
+		return help
+	}
+	return append(help, errorStyle.Render("Error: "+m.err.Error()))
 }
 
 func computeScrollPercent(scrollPos, totalLines, visibleHeight int) int {
@@ -370,18 +384,7 @@ func (m Model) renderCommits(width, height int) string {
 
 	// If no commits ahead, show changes summary
 	if len(m.commits) == 0 {
-		var lines []string
-		lines = append(lines, panelInfoStyle.Render("No commits ahead of main"))
-
-		// Show changed file count if available.
-		if len(m.diffFiles) > 0 {
-			lines = append(lines, "")
-			lines = append(lines, panelInfoStyle.Render(fmt.Sprintf("Changes: %d files", len(m.diffFiles))))
-		}
-
-		content := strings.Join(lines, "\n")
-
-		return m.renderPanel(content, width, height, m.panel == FileTreePanel)
+		return m.renderPanel(m.renderEmptyCommitList(), width, height, m.panel == FileTreePanel)
 	}
 
 	// Get visible commits.
@@ -393,21 +396,7 @@ func (m Model) renderCommits(width, height int) string {
 	for i, commit := range visibleCommits {
 		globalIndex := start + i
 		isSelected := globalIndex == m.selectedIndex
-
-		// Build commit line
-		line := commitHashStyle.Render(commit.ShortHash) + " " +
-			commitAuthorStyle.Render(commit.Author) + " " +
-			commitDateStyle.Render(commit.Date) + "\n" +
-			"    " + commitMessageStyle.Render(commit.Message)
-
-		if isSelected && m.panel == FileTreePanel {
-			line = selectedStyle.Render(commit.ShortHash + " " + commit.Author + " " + commit.Date)
-			lines = append(lines, line)
-			// Add message on next line
-			lines = append(lines, "    "+commitMessageStyle.Render(commit.Message))
-		} else {
-			lines = append(lines, line)
-		}
+		lines = append(lines, renderCommitLines(commit, isSelected, m.panel == FileTreePanel, selectedStyle)...)
 	}
 
 	// Build content as a single string
@@ -415,6 +404,27 @@ func (m Model) renderCommits(width, height int) string {
 
 	// Apply panel styling with border
 	return m.renderPanel(content, width, height, m.panel == FileTreePanel)
+}
+
+func (m Model) renderEmptyCommitList() string {
+	lines := []string{panelInfoStyle.Render("No commits ahead of main")}
+	if len(m.diffFiles) > 0 {
+		lines = append(lines, "", panelInfoStyle.Render(fmt.Sprintf("Changes: %d files", len(m.diffFiles))))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func renderCommitLines(commit Commit, isSelected, isTreePanelActive bool, selectedStyle lipgloss.Style) []string {
+	if isSelected && isTreePanelActive {
+		header := selectedStyle.Render(commit.ShortHash + " " + commit.Author + " " + commit.Date)
+		return []string{header, "    " + commitMessageStyle.Render(commit.Message)}
+	}
+
+	line := commitHashStyle.Render(commit.ShortHash) + " " +
+		commitAuthorStyle.Render(commit.Author) + " " +
+		commitDateStyle.Render(commit.Date) + "\n" +
+		"    " + commitMessageStyle.Render(commit.Message)
+	return []string{line}
 }
 
 func (m Model) renderPanel(content string, width, height int, active bool) string {

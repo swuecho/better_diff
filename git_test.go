@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	gitindex "github.com/go-git/go-git/v5/plumbing/format/index"
 )
 
 // setupGitService creates a GitService for testing
@@ -14,6 +16,32 @@ func setupGitService(t *testing.T) *GitService {
 		t.Skipf("Skipping test: not in a git repository or git service init failed: %v", err)
 	}
 	return gitService
+}
+
+func removePathFromGitIndex(t *testing.T, gitService *GitService, path string) {
+	t.Helper()
+
+	idx, err := gitService.GetRepository().Storer.Index()
+	if err != nil {
+		t.Logf("skip index cleanup for %s: %v", path, err)
+		return
+	}
+
+	idx.Entries = filterIndexEntriesByPath(idx.Entries, path)
+	if err := gitService.GetRepository().Storer.SetIndex(idx); err != nil {
+		t.Logf("skip index write for %s: %v", path, err)
+	}
+}
+
+func filterIndexEntriesByPath(entries []*gitindex.Entry, path string) []*gitindex.Entry {
+	filtered := entries[:0]
+	for _, entry := range entries {
+		if entry.Name == path {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	return filtered
 }
 
 func TestSplitLines(t *testing.T) {
@@ -380,7 +408,10 @@ func TestGetDiff(t *testing.T) {
 
 	// Create a temporary test file
 	tmpFile := "test_temp_file.txt"
-	defer os.Remove(tmpFile)
+	t.Cleanup(func() {
+		_ = os.Remove(tmpFile)
+		removePathFromGitIndex(t, gitService, tmpFile)
+	})
 
 	// Write initial content
 	content1 := "line1\nline2\nline3\n"

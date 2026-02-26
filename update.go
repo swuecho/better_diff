@@ -22,6 +22,34 @@ type diffLayout struct {
 	hunkStarts []int
 }
 
+type treeChangeSummary struct {
+	linesAdded   int
+	linesRemoved int
+	hasAdded     bool
+	hasDeleted   bool
+}
+
+func (s *treeChangeSummary) add(linesAdded, linesRemoved int, changeType ChangeType) {
+	s.linesAdded += linesAdded
+	s.linesRemoved += linesRemoved
+	switch changeType {
+	case Added:
+		s.hasAdded = true
+	case Deleted:
+		s.hasDeleted = true
+	}
+}
+
+func (s treeChangeSummary) changeType() ChangeType {
+	if s.hasAdded && !s.hasDeleted {
+		return Added
+	}
+	if s.hasDeleted && !s.hasAdded {
+		return Deleted
+	}
+	return Modified
+}
+
 // Update implements tea.Model
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch typed := msg.(type) {
@@ -44,10 +72,13 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	var cmd tea.Cmd
+	return m, m.runKeyAction(key)
+}
+
+func (m *Model) runKeyAction(key string) tea.Cmd {
 	switch key {
 	case "q", "ctrl+c":
-		cmd = m.quitCmd()
+		return m.quitCmd()
 	case "up", "k":
 		m.handleUpKey(key)
 	case "down", "j":
@@ -63,22 +94,30 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "tab":
 		m.togglePanel()
 	case "enter", " ":
-		if m.panel == FileTreePanel {
-			cmd = m.selectItem()
-		}
+		return m.selectFileTreeItem()
 	case "s":
-		cmd = m.toggleDiffMode()
+		return m.toggleDiffMode()
 	case "f":
-		cmd = m.toggleDiffViewMode()
+		return m.toggleDiffViewMode()
 	case "o":
-		cmd = m.adjustDiffContext(DefaultDiffContext)
+		return m.adjustDiffContext(DefaultDiffContext)
 	case "O":
-		cmd = m.resetDiffContext()
+		return m.resetDiffContext()
 	case "?":
-		m.showHelp = !m.showHelp
+		m.toggleHelp()
 	}
+	return nil
+}
 
-	return m, cmd
+func (m *Model) selectFileTreeItem() tea.Cmd {
+	if m.panel != FileTreePanel {
+		return nil
+	}
+	return m.selectItem()
+}
+
+func (m *Model) toggleHelp() {
+	m.showHelp = !m.showHelp
 }
 
 func (m *Model) resetPendingVimTopJumpIfNeeded(key string) {
@@ -227,9 +266,9 @@ func (m Model) handleAsyncMsg(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case diffLoadedMsg:
 		m.upsertLoadedDiff(typed.file)
 	case ShowHelpMsg:
-		m.showHelp = true
+		m.setHelpVisibility(true)
 	case HideHelpMsg:
-		m.showHelp = false
+		m.setHelpVisibility(false)
 	case errMsg:
 		m.err = typed.err
 	case clearErrorMsg:
@@ -238,6 +277,10 @@ func (m Model) handleAsyncMsg(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m *Model) setHelpVisibility(visible bool) {
+	m.showHelp = visible
 }
 
 func (m Model) loadBranchCompareData() tea.Cmd {
@@ -623,43 +666,56 @@ func appendFlattenedTree(dst *[]TreeNode, nodes []TreeNode, depth int) {
 
 // buildFileTree builds the file tree from the list of changed files
 func (m *Model) buildFileTree() {
-	// Clear previous tree
-	m.fileTree = nil
-
-	root := &dirNode{
-		subdirs: make(map[string]*dirNode),
-	}
-
-	// Build directory structure
-	for _, file := range m.files {
-		parts := splitPath(file.Path)
-		current := root
-
-		for i, part := range parts {
-			if i == len(parts)-1 {
-				// This is the file
-				current.files = append(current.files, file)
-			} else {
-				// This is a directory
-				if current.subdirs[part] == nil {
-					current.subdirs[part] = &dirNode{
-						path:    joinPath(parts[:i+1]),
-						name:    part,
-						subdirs: make(map[string]*dirNode),
-					}
-				}
-				current = current.subdirs[part]
-			}
-		}
-	}
-
-	// Convert to TreeNode structure
+	root := buildDirTree(m.files)
 	m.fileTree = buildTreeNodes(root, 0)
 
 	// Auto-expand if there are directories
 	if len(m.fileTree) == 1 && m.fileTree[0].isDir {
 		m.fileTree[0].isExpanded = true
 	}
+}
+
+func buildDirTree(files []FileDiff) *dirNode {
+	root := &dirNode{
+		subdirs: make(map[string]*dirNode),
+	}
+
+	for _, file := range files {
+		addFileToDirTree(root, file)
+	}
+
+	return root
+}
+
+func addFileToDirTree(root *dirNode, file FileDiff) {
+	parts := splitPath(file.Path)
+	if len(parts) == 0 {
+		return
+	}
+
+	current := root
+	for i, part := range parts {
+		isFile := i == len(parts)-1
+		if isFile {
+			current.files = append(current.files, file)
+			continue
+		}
+		current = ensureSubdir(current, parts, i, part)
+	}
+}
+
+func ensureSubdir(current *dirNode, parts []string, idx int, name string) *dirNode {
+	if child, exists := current.subdirs[name]; exists {
+		return child
+	}
+
+	newNode := &dirNode{
+		path:    joinPath(parts[:idx+1]),
+		name:    name,
+		subdirs: make(map[string]*dirNode),
+	}
+	current.subdirs[name] = newNode
+	return newNode
 }
 
 func buildTreeNodes(dir *dirNode, depth int) []TreeNode {
@@ -669,10 +725,7 @@ func buildTreeNodes(dir *dirNode, depth int) []TreeNode {
 
 func buildTreeNodesWithSummary(dir *dirNode, depth int) ([]TreeNode, int, int, ChangeType) {
 	var nodes []TreeNode
-	totalAdded := 0
-	totalRemoved := 0
-	hasAdded := false
-	hasDeleted := false
+	summary := treeChangeSummary{}
 
 	// Add subdirectories first
 	subdirNames := make([]string, 0, len(dir.subdirs))
@@ -683,13 +736,7 @@ func buildTreeNodesWithSummary(dir *dirNode, depth int) ([]TreeNode, int, int, C
 	for _, name := range subdirNames {
 		subdir := dir.subdirs[name]
 		childNodes, childAdded, childRemoved, childType := buildTreeNodesWithSummary(subdir, depth+1)
-		totalAdded += childAdded
-		totalRemoved += childRemoved
-		if childType == Added {
-			hasAdded = true
-		} else if childType == Deleted {
-			hasDeleted = true
-		}
+		summary.add(childAdded, childRemoved, childType)
 
 		nodes = append(nodes, TreeNode{
 			name:         subdir.name,
@@ -708,13 +755,7 @@ func buildTreeNodesWithSummary(dir *dirNode, depth int) ([]TreeNode, int, int, C
 		return dir.files[i].Path < dir.files[j].Path
 	})
 	for _, file := range dir.files {
-		totalAdded += file.LinesAdded
-		totalRemoved += file.LinesRemoved
-		if file.ChangeType == Added {
-			hasAdded = true
-		} else if file.ChangeType == Deleted {
-			hasDeleted = true
-		}
+		summary.add(file.LinesAdded, file.LinesRemoved, file.ChangeType)
 
 		nodes = append(nodes, TreeNode{
 			name:         fileNameFromPath(file.Path),
@@ -726,14 +767,7 @@ func buildTreeNodesWithSummary(dir *dirNode, depth int) ([]TreeNode, int, int, C
 		})
 	}
 
-	changeType := Modified
-
-	if hasAdded && !hasDeleted {
-		changeType = Added
-	} else if hasDeleted && !hasAdded {
-		changeType = Deleted
-	}
-	return nodes, totalAdded, totalRemoved, changeType
+	return nodes, summary.linesAdded, summary.linesRemoved, summary.changeType()
 }
 
 func nextDiffMode(mode DiffMode) DiffMode {
