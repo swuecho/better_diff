@@ -25,8 +25,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.vimPendingG = false
 		}
 
+		// When help is visible, only allow help toggle and quit keys.
+		if m.showHelp && msg.String() != "?" && msg.String() != "q" && msg.String() != "ctrl+c" {
+			return m, nil
+		}
+
 		switch msg.String() {
 		case "q", "ctrl+c":
+			if m.watcher != nil {
+				_ = m.watcher.Close()
+			}
 			m.quitting = true
 			return m, tea.Quit
 
@@ -128,9 +136,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.selectedCommit = nil // Clear selected commit
 
 			if m.diffMode == BranchCompare {
-				return m, m.LoadCommitsAhead()
+				return m, tea.Batch(m.LoadCommitsAhead(), m.LoadBranchCompareDiff(nil))
 			}
-			return m, m.LoadFiles()
+			return m, tea.Batch(m.LoadFiles(), m.LoadAllDiffs())
 
 		case "f":
 			// Toggle between diff-only and whole file view
@@ -143,7 +151,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.diffScroll = 0
 			m.diffFiles = nil
 			if m.diffMode == BranchCompare {
-				return m, m.LoadCommitsAhead()
+				return m, tea.Batch(m.LoadCommitsAhead(), m.LoadBranchCompareDiff(m.commits))
 			}
 			return m, m.LoadAllDiffs()
 
@@ -196,7 +204,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case FSChangeMsg:
 		// File system changed, check for actual changes
 		cmd := m.checkForChanges()
-		// Always continue watching after checking
+		// Re-arm watcher exactly once per change event.
 		if m.watcher != nil {
 			return m, tea.Batch(cmd, m.watcher.WaitForChange())
 		}
@@ -204,15 +212,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case filesLoadedMsg:
 		m.files = msg.files
-		m.lastFileHash = computeFileHash(msg.files)
+		m.err = nil
+		if m.diffMode != BranchCompare && len(m.diffFiles) > 0 {
+			m.files = mergeFilesWithDiffStats(m.files, m.diffFiles)
+		}
+		m.lastFileHash = computeFilesAndDiffHash(m.files, m.diffFiles)
 		m.buildFileTree()
 		return m, nil
 
 	case allDiffsLoadedMsg:
 		m.diffFiles = msg.files
-		m.lastFileHash = computeDiffHash(msg.files)
+		m.err = nil
 		if m.diffMode == BranchCompare {
+			m.lastFileHash = computeBranchCompareHash(msg.files, m.commits)
 			m.files = aggregateBranchCompareFiles(msg.files)
+			m.buildFileTree()
+			if m.selectedIndex >= len(m.flattenTree()) {
+				m.selectedIndex = 0
+			}
+		} else {
+			m.files = mergeFilesWithDiffStats(m.files, msg.files)
+			m.lastFileHash = computeFilesAndDiffHash(m.files, msg.files)
 			m.buildFileTree()
 			if m.selectedIndex >= len(m.flattenTree()) {
 				m.selectedIndex = 0
@@ -222,27 +242,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case commitsLoadedMsg:
 		m.commits = msg.commits
+		m.err = nil
 		m.selectedCommit = nil // Reset selected commit
-		m.diffFiles = nil      // Clear previous diffs
-		return m, m.LoadBranchCompareDiff(m.commits)
+		return m, nil
 
 	case filesChangedMsg:
 		// Files have changed, reload everything
+		m.lastFileHash = msg.hash
 		if m.diffMode != BranchCompare {
 			m.files = msg.files
-			m.lastFileHash = msg.hash
 			m.buildFileTree()
 		}
 		m.diffFiles = nil // Clear old diffs
 		// Reload diffs and continue watching
 		var cmd tea.Cmd
 		if m.diffMode == BranchCompare {
-			cmd = m.LoadCommitsAhead()
+			cmd = tea.Batch(m.LoadCommitsAhead(), m.LoadBranchCompareDiff(m.commits))
 		} else {
 			cmd = m.LoadAllDiffs()
-		}
-		if m.watcher != nil {
-			return m, tea.Batch(cmd, m.watcher.WaitForChange())
 		}
 		return m, cmd
 
@@ -304,7 +321,7 @@ func (m *Model) moveDown() {
 		m.selectedIndex++
 
 		// Auto scroll if needed
-		visibleHeight := m.height - 3 // minus header and footer
+		visibleHeight := m.visibleContentRows()
 		if m.selectedIndex >= m.scrollOffset+visibleHeight {
 			m.scrollOffset = m.selectedIndex - visibleHeight + 1
 		}
@@ -313,10 +330,7 @@ func (m *Model) moveDown() {
 
 // movePageUp moves the selection up by a page
 func (m *Model) movePageUp() {
-	visibleHeight := m.height - 3
-	if visibleHeight < 1 {
-		visibleHeight = 1
-	}
+	visibleHeight := m.visibleContentRows()
 
 	// Move selection up by a page
 	m.selectedIndex -= visibleHeight
@@ -332,12 +346,14 @@ func (m *Model) movePageUp() {
 
 // movePageDown moves the selection down by a page
 func (m *Model) movePageDown() {
-	visibleHeight := m.height - 3
-	if visibleHeight < 1 {
-		visibleHeight = 1
-	}
+	visibleHeight := m.visibleContentRows()
 
 	maxIndex := len(m.flattenTree()) - 1
+	if maxIndex < 0 {
+		m.selectedIndex = 0
+		m.scrollOffset = 0
+		return
+	}
 
 	m.selectedIndex += visibleHeight
 	if m.selectedIndex > maxIndex {
@@ -361,7 +377,7 @@ func (m *Model) moveDiffUp() {
 func (m *Model) moveDiffDown() {
 	// Get total diff line count
 	totalLines := m.getDiffLineCount()
-	visibleHeight := m.height - 3 // minus header and footer
+	visibleHeight := m.visibleContentRows()
 
 	if m.diffScroll < totalLines-visibleHeight {
 		m.diffScroll++
@@ -370,10 +386,7 @@ func (m *Model) moveDiffDown() {
 
 // moveDiffPageUp scrolls the diff view up by a page
 func (m *Model) moveDiffPageUp() {
-	visibleHeight := m.height - 3
-	if visibleHeight < 1 {
-		visibleHeight = 1
-	}
+	visibleHeight := m.visibleContentRows()
 
 	m.diffScroll -= visibleHeight
 	if m.diffScroll < 0 {
@@ -383,10 +396,7 @@ func (m *Model) moveDiffPageUp() {
 
 // moveDiffPageDown scrolls the diff view down by a page
 func (m *Model) moveDiffPageDown() {
-	visibleHeight := m.height - 3
-	if visibleHeight < 1 {
-		visibleHeight = 1
-	}
+	visibleHeight := m.visibleContentRows()
 
 	totalLines := m.getDiffLineCount()
 	m.diffScroll += visibleHeight
@@ -397,7 +407,7 @@ func (m *Model) moveDiffPageDown() {
 
 func (m Model) reloadCurrentDiffs() tea.Cmd {
 	if m.diffMode == BranchCompare {
-		return m.LoadCommitsAhead()
+		return tea.Batch(m.LoadCommitsAhead(), m.LoadBranchCompareDiff(m.commits))
 	}
 	return m.LoadAllDiffs()
 }
@@ -410,11 +420,17 @@ func (m *Model) moveDiffToTop() {
 // moveDiffToBottom scrolls the diff view to the bottom.
 func (m *Model) moveDiffToBottom() {
 	totalLines := m.getDiffLineCount()
-	visibleHeight := m.height - 3
-	if visibleHeight < 1 {
-		visibleHeight = 1
-	}
+	visibleHeight := m.visibleContentRows()
 	m.diffScroll = max(0, totalLines-visibleHeight)
+}
+
+func (m Model) visibleContentRows() int {
+	// Terminal rows minus header/footer rows and panel border rows.
+	rows := m.height - 5
+	if rows < 1 {
+		rows = 1
+	}
+	return rows
 }
 
 func max(a, b int) int {
@@ -461,14 +477,8 @@ func (m *Model) getDiffLineCount() int {
 
 // selectItem handles selection of current item
 func (m *Model) selectItem() tea.Cmd {
-	// In branch compare mode, files are already loaded; just keep current selection.
-	if m.diffMode == BranchCompare {
-		m.diffScroll = 0
-		return nil
-	}
-
 	flatTree := m.flattenTree()
-	if m.selectedIndex >= len(flatTree) {
+	if m.selectedIndex < 0 || m.selectedIndex >= len(flatTree) {
 		return nil
 	}
 
@@ -478,6 +488,12 @@ func (m *Model) selectItem() tea.Cmd {
 		m.toggleDirectory(node.path)
 		return nil
 	} else {
+		// In branch compare mode, file diffs are already loaded.
+		if m.diffMode == BranchCompare {
+			m.diffScroll = 0
+			return nil
+		}
+
 		// Reset diff scroll when selecting a new file
 		m.diffScroll = 0
 		// Load diff for the file
@@ -552,7 +568,7 @@ func (m Model) getCurrentHunkStartLines() []int {
 
 func (m Model) getSelectedDiffFiles() []*FileDiff {
 	flatTree := m.flattenTree()
-	if m.selectedIndex >= len(flatTree) {
+	if m.selectedIndex < 0 || m.selectedIndex >= len(flatTree) {
 		return nil
 	}
 
@@ -798,21 +814,15 @@ func (m Model) checkForChanges() tea.Cmd {
 				return nil
 			}
 
-			stagedDiffs, unstagedDiffs, err := m.git.GetBranchCompareDiffs(m.diffViewMode, m.diffContext, m.logger)
+			unifiedDiffs, err := m.git.GetUnifiedBranchCompareDiff(m.diffViewMode, m.diffContext, m.logger)
 			if err != nil {
 				if m.logger != nil {
-					m.logger.Error("Failed to check staged/unstaged diffs in branch compare", err, nil)
+					m.logger.Error("Failed to check unified branch compare diff", err, nil)
 				}
 				return nil
 			}
 
-			combined := make([]FileDiff, 0, len(stagedDiffs)+len(unstagedDiffs))
-			combined = append(combined, stagedDiffs...)
-			combined = append(combined, unstagedDiffs...)
-			currentHash := computeDiffHash(combined)
-			for _, c := range commits {
-				currentHash += "|" + c.Hash
-			}
+			currentHash := computeBranchCompareHash(unifiedDiffs, commits)
 
 			if currentHash != m.lastFileHash {
 				if m.logger != nil {
@@ -845,7 +855,7 @@ func (m Model) checkForChanges() tea.Cmd {
 			}
 			return nil
 		}
-		currentHash := computeDiffHash(diffs)
+		currentHash := computeFilesAndDiffHash(files, diffs)
 
 		if currentHash != m.lastFileHash {
 			if m.logger != nil {
@@ -908,6 +918,55 @@ func computeDiffHash(files []FileDiff) string {
 		}
 	}
 	return fmt.Sprintf("%x", h.Sum64())
+}
+
+func computeBranchCompareHash(files []FileDiff, commits []Commit) string {
+	base := computeDiffHash(files)
+	if len(commits) == 0 {
+		return base
+	}
+
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(base))
+	for _, c := range commits {
+		_, _ = h.Write([]byte("|" + c.Hash))
+	}
+	return fmt.Sprintf("%x", h.Sum64())
+}
+
+func computeFilesAndDiffHash(files []FileDiff, diffs []FileDiff) string {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte("files=" + computeFileHash(files)))
+	_, _ = h.Write([]byte("|diffs=" + computeDiffHash(diffs)))
+	return fmt.Sprintf("%x", h.Sum64())
+}
+
+func mergeFilesWithDiffStats(files []FileDiff, diffs []FileDiff) []FileDiff {
+	if len(diffs) == 0 {
+		return files
+	}
+
+	statsByPath := make(map[string]FileDiff, len(diffs))
+	for _, d := range diffs {
+		statsByPath[d.Path] = d
+	}
+
+	if len(files) == 0 {
+		merged := make([]FileDiff, len(diffs))
+		copy(merged, diffs)
+		return merged
+	}
+
+	merged := make([]FileDiff, 0, len(files))
+	for _, f := range files {
+		if d, ok := statsByPath[f.Path]; ok {
+			f.LinesAdded = d.LinesAdded
+			f.LinesRemoved = d.LinesRemoved
+			f.ChangeType = d.ChangeType
+		}
+		merged = append(merged, f)
+	}
+	return merged
 }
 
 func aggregateBranchCompareFiles(diffFiles []FileDiff) []FileDiff {

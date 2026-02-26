@@ -1,2 +1,4 @@
 .claude
 better_diff
+.gocache/
+.gomodcache/

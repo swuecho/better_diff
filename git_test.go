@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -99,8 +100,8 @@ func TestComputeHunks(t *testing.T) {
 			oldLines:       []string{"line1", "line2"},
 			newLines:       []string{"line1", "line2", "line3"},
 			expectedHunks:  1,
-			expectedAdd:    2, // Diff algorithm sees this as replace line2 + add line3
-			expectedRemove: 1,
+			expectedAdd:    1,
+			expectedRemove: 0,
 		},
 		{
 			name:           "delete line",
@@ -227,6 +228,63 @@ func TestComputeHunksNoEmptyLines(t *testing.T) {
 				t.Errorf("Found empty line content in hunk: %+v", line)
 			}
 		}
+	}
+}
+
+func TestComputeHunksWithContextIncludesLeadingLines(t *testing.T) {
+	oldLines := []string{"a", "b", "c", "d", "e"}
+	newLines := []string{"a", "b", "X", "d", "e"}
+
+	hunks, err := computeHunksWithContext(oldLines, newLines, 1)
+	if err != nil {
+		t.Fatalf("computeHunksWithContext() error = %v", err)
+	}
+
+	if len(hunks) != 1 {
+		t.Fatalf("computeHunksWithContext() returned %d hunks, want 1", len(hunks))
+	}
+
+	hunk := hunks[0]
+	if hunk.OldStart != 2 || hunk.NewStart != 2 {
+		t.Fatalf("hunk starts = old:%d new:%d, want old:2 new:2", hunk.OldStart, hunk.NewStart)
+	}
+
+	if len(hunk.Lines) < 3 {
+		t.Fatalf("hunk line count = %d, want at least 3", len(hunk.Lines))
+	}
+
+	if hunk.Lines[0].Type != LineContext || hunk.Lines[0].Content != "b" {
+		t.Fatalf("first line = (%v, %q), want context \"b\"", hunk.Lines[0].Type, hunk.Lines[0].Content)
+	}
+}
+
+func TestComputeHunksWithLargeContextBehavesLikeWholeFile(t *testing.T) {
+	oldLines := []string{"a", "b", "c", "d"}
+	newLines := []string{"a", "B", "c", "d"}
+
+	hunks, err := computeHunksWithContext(oldLines, newLines, WholeFileContext)
+	if err != nil {
+		t.Fatalf("computeHunksWithContext() error = %v", err)
+	}
+
+	if len(hunks) != 1 {
+		t.Fatalf("computeHunksWithContext() returned %d hunks, want 1", len(hunks))
+	}
+
+	hunk := hunks[0]
+	if hunk.OldStart != 1 || hunk.NewStart != 1 {
+		t.Fatalf("hunk starts = old:%d new:%d, want old:1 new:1", hunk.OldStart, hunk.NewStart)
+	}
+
+	containsA := false
+	for _, line := range hunk.Lines {
+		if line.Type == LineContext && line.Content == "a" {
+			containsA = true
+			break
+		}
+	}
+	if !containsA {
+		t.Fatalf("expected leading unchanged line \"a\" in whole-file context hunk")
 	}
 }
 
@@ -361,6 +419,33 @@ func TestGetDiff(t *testing.T) {
 
 	if !found {
 		t.Errorf("Test file %s not found in diffs", tmpFile)
+	}
+}
+
+func TestGetUnifiedBranchCompareDiffSkipsLargeUntrackedFile(t *testing.T) {
+	gitService := setupGitService(t)
+	logger, err := NewLogger(INFO, "")
+	if err != nil {
+		t.Logf("logger fallback in tests: %v", err)
+	}
+
+	largeFile := "test_large_untracked_file.tmp"
+	defer os.Remove(largeFile)
+
+	content := bytes.Repeat([]byte("x"), MaxFileSize+1)
+	if err := os.WriteFile(largeFile, content, 0644); err != nil {
+		t.Fatalf("failed to create large test file: %v", err)
+	}
+
+	diffs, err := gitService.GetUnifiedBranchCompareDiff(DiffOnly, DefaultDiffContext, logger)
+	if err != nil {
+		t.Fatalf("GetUnifiedBranchCompareDiff should skip large files, got error: %v", err)
+	}
+
+	for _, d := range diffs {
+		if d.Path == largeFile {
+			t.Fatalf("large file %s should be skipped from branch compare diffs", largeFile)
+		}
 	}
 }
 

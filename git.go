@@ -88,9 +88,40 @@ const (
 	MaxFileSize = 10 * 1024 * 1024
 )
 
-// computeHunks computes diff hunks using the default context size.
+// computeHunks computes hunks with default grouping behavior and normalizes
+// hunk headers to start at the first changed line.
 func computeHunks(oldLines, newLines []string) ([]Hunk, error) {
-	return computeHunksWithContext(oldLines, newLines, DefaultDiffContext)
+	hunks, err := computeHunksWithContext(oldLines, newLines, DefaultDiffContext)
+	if err != nil {
+		return nil, err
+	}
+
+	normalized := make([]Hunk, 0, len(hunks))
+	for _, h := range hunks {
+		leadCtx := 0
+		for _, l := range h.Lines {
+			if l.Type != LineContext {
+				break
+			}
+			leadCtx++
+		}
+
+		if leadCtx > 0 {
+			h.Lines = h.Lines[leadCtx:]
+			h.OldStart += leadCtx
+			h.NewStart += leadCtx
+			if h.OldCount >= leadCtx {
+				h.OldCount -= leadCtx
+			}
+			if h.NewCount >= leadCtx {
+				h.NewCount -= leadCtx
+			}
+		}
+
+		normalized = append(normalized, h)
+	}
+
+	return normalized, nil
 }
 
 // computeHunksWithContext computes diff hunks using Myers diff algorithm with a custom context size.
@@ -101,9 +132,10 @@ func computeHunksWithContext(oldLines, newLines []string, contextLines int) ([]H
 		contextLines = 0
 	}
 
-	// Join lines with newline to create the full text
-	oldText := strings.Join(oldLines, "\n")
-	newText := strings.Join(newLines, "\n")
+	// Join lines with a trailing newline sentinel so pure append/prepend edits
+	// are not misclassified as replace operations on the final line.
+	oldText := joinLinesForDiff(oldLines)
+	newText := joinLinesForDiff(newLines)
 
 	// Convert to line-based character encoding
 	// This encodes each unique line as a single character for efficient diffing
@@ -151,6 +183,7 @@ func computeHunksWithContext(oldLines, newLines []string, contextLines int) ([]H
 	// Convert line diffs to hunks
 	var hunks []Hunk
 	var currentHunk *Hunk
+	pendingEqual := []string{}
 
 	oldLineNum := 1
 	newLineNum := 1
@@ -173,7 +206,7 @@ func computeHunksWithContext(oldLines, newLines []string, contextLines int) ([]H
 					newLineNum++
 				}
 
-				// Check if we should close the hunk
+				// Check if we should close the hunk and split around large unchanged regions.
 				trailingContext := 0
 				for i := len(currentHunk.Lines) - 1; i >= 0; i-- {
 					if currentHunk.Lines[i].Type == LineContext {
@@ -194,31 +227,61 @@ func computeHunksWithContext(oldLines, newLines []string, contextLines int) ([]H
 					}
 
 					if hasChanges {
-						currentHunk.OldCount = oldLineNum - currentHunk.OldStart - trailingContext
-						currentHunk.NewCount = newLineNum - currentHunk.NewStart - trailingContext
-
+						trimCount := 0
 						// Trim to keep only contextLines lines of trailing context
 						if trailingContext > contextLines {
-							trimCount := trailingContext - contextLines
+							trimCount = trailingContext - contextLines
 							currentHunk.Lines = currentHunk.Lines[:len(currentHunk.Lines)-trimCount]
 						}
+						currentHunk.OldCount = oldLineNum - currentHunk.OldStart - trimCount
+						currentHunk.NewCount = newLineNum - currentHunk.NewStart - trimCount
 
 						hunks = append(hunks, *currentHunk)
 						currentHunk = nil
+
+						// Keep tail context as potential leading context for the next hunk.
+						if contextLines > 0 {
+							if len(diff.Lines) > contextLines {
+								pendingEqual = append([]string(nil), diff.Lines[len(diff.Lines)-contextLines:]...)
+							} else {
+								pendingEqual = append([]string(nil), diff.Lines...)
+							}
+						} else {
+							pendingEqual = pendingEqual[:0]
+						}
 					}
 				}
 			} else {
 				oldLineNum += len(diff.Lines)
 				newLineNum += len(diff.Lines)
+				if contextLines > 0 {
+					pendingEqual = append(pendingEqual, diff.Lines...)
+					if len(pendingEqual) > contextLines {
+						pendingEqual = append([]string(nil), pendingEqual[len(pendingEqual)-contextLines:]...)
+					}
+				} else {
+					pendingEqual = pendingEqual[:0]
+				}
 			}
 
 		case diffmatchpatch.DiffDelete:
 			if currentHunk == nil {
-				currentHunk = &Hunk{
-					Lines:    []DiffLine{},
-					OldStart: oldLineNum,
-					NewStart: newLineNum,
+				leadingContext := pendingEqual
+				if contextLines <= 0 {
+					leadingContext = nil
 				}
+				currentHunk = &Hunk{
+					Lines:    make([]DiffLine, 0, len(leadingContext)+len(diff.Lines)),
+					OldStart: oldLineNum - len(leadingContext),
+					NewStart: newLineNum - len(leadingContext),
+				}
+				for _, line := range leadingContext {
+					currentHunk.Lines = append(currentHunk.Lines, DiffLine{
+						Type:    LineContext,
+						Content: line,
+					})
+				}
+				pendingEqual = pendingEqual[:0]
 			}
 
 			for _, line := range diff.Lines {
@@ -231,11 +294,22 @@ func computeHunksWithContext(oldLines, newLines []string, contextLines int) ([]H
 
 		case diffmatchpatch.DiffInsert:
 			if currentHunk == nil {
-				currentHunk = &Hunk{
-					Lines:    []DiffLine{},
-					OldStart: oldLineNum,
-					NewStart: newLineNum,
+				leadingContext := pendingEqual
+				if contextLines <= 0 {
+					leadingContext = nil
 				}
+				currentHunk = &Hunk{
+					Lines:    make([]DiffLine, 0, len(leadingContext)+len(diff.Lines)),
+					OldStart: oldLineNum - len(leadingContext),
+					NewStart: newLineNum - len(leadingContext),
+				}
+				for _, line := range leadingContext {
+					currentHunk.Lines = append(currentHunk.Lines, DiffLine{
+						Type:    LineContext,
+						Content: line,
+					})
+				}
+				pendingEqual = pendingEqual[:0]
 			}
 
 			for _, line := range diff.Lines {
@@ -274,6 +348,13 @@ func computeHunksWithContext(oldLines, newLines []string, contextLines int) ([]H
 	}
 
 	return hunks, nil
+}
+
+func joinLinesForDiff(lines []string) string {
+	if len(lines) == 0 {
+		return ""
+	}
+	return strings.Join(lines, "\n") + "\n"
 }
 
 // splitLines splits content by newline and normalizes the result

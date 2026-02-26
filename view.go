@@ -287,7 +287,7 @@ func (m Model) renderDiffPanel(width, height int) string {
 		commitHeaderStyle := lipgloss.NewStyle().
 			Foreground(lipgloss.Color("86")).
 			Bold(true)
-		allLines = append(allLines, commitHeaderStyle.Render("Branch Compare: combined file changes"))
+		allLines = append(allLines, commitHeaderStyle.Render("Branch Compare: current working tree vs default branch"))
 		allLines = append(allLines, "")
 	}
 
@@ -295,7 +295,7 @@ func (m Model) renderDiffPanel(width, height int) string {
 		// No file selected
 		msg := "Select a file to view diff"
 		if m.diffMode == BranchCompare {
-			msg = "Select a file to view combined changes"
+			msg = "Select a file to view unified changes"
 		}
 		allLines = append(allLines, lipgloss.NewStyle().
 			Foreground(lipgloss.Color("243")).
@@ -407,27 +407,61 @@ func (m Model) renderFooter() string {
 	scrollStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("yellow"))
 
-	// Build help text
-	help := []string{
-		keyStyle.Render("[↑↓]") + " Navigate",
-		keyStyle.Render("[PgUp/PgDn]") + " Page",
-		keyStyle.Render("[j/k]") + " Hunk Jump",
-		keyStyle.Render("[o/O]") + " Expand/Reset",
-		keyStyle.Render("[gg/G]") + " Top/Bottom",
-		keyStyle.Render("[Enter]") + " Select/Expand",
-		keyStyle.Render("[Tab]") + " Switch Panel",
-		keyStyle.Render("[s]") + " Staged/Unstaged/Branch",
-		keyStyle.Render("[f]") + " Diff/Whole File",
-		keyStyle.Render("[q]") + " Quit",
+	// Build contextual help text to reduce footer overload.
+	help := []string{}
+
+	if m.panel == FileTreePanel {
+		help = append(help, keyStyle.Render("[↑↓/j/k]")+" Navigate")
+		help = append(help, keyStyle.Render("[PgUp/PgDn]")+" Page")
+		help = append(help, keyStyle.Render("[Enter]")+" Select/Expand")
+	} else {
+		help = append(help, keyStyle.Render("[↑↓]")+" Scroll")
+		help = append(help, keyStyle.Render("[PgUp/PgDn]")+" Page")
+		if m.diffViewMode == DiffOnly {
+			help = append(help, keyStyle.Render("[j/k]")+" Hunk Jump")
+		} else {
+			help = append(help, keyStyle.Render("[j/k]")+" Scroll")
+		}
+		help = append(help, keyStyle.Render("[gg/G]")+" Top/Bottom")
 	}
+
+	if m.diffViewMode == DiffOnly {
+		help = append(help, keyStyle.Render("[o/O]")+" Expand/Reset")
+		help = append(help, keyStyle.Render("[Tab]")+" Switch Panel")
+	}
+
+	help = append(help, keyStyle.Render("[s]")+" Mode")
+	help = append(help, keyStyle.Render("[f]")+" Diff/Whole File")
+	help = append(help, keyStyle.Render("[?]")+" Help")
+	help = append(help, keyStyle.Render("[q]")+" Quit")
 
 	// Add scroll indicator for diff panel
 	if m.panel == DiffPanel {
 		totalLines := m.getDiffLineCount()
 		if totalLines > 0 {
-			scrollPercent := (m.diffScroll * 100) / totalLines
+			visibleHeight := m.visibleContentRows()
+
+			maxScroll := max(0, totalLines-visibleHeight)
+			scrollPercent := 100
+			if maxScroll > 0 {
+				scrollPos := m.diffScroll
+				if scrollPos < 0 {
+					scrollPos = 0
+				}
+				if scrollPos > maxScroll {
+					scrollPos = maxScroll
+				}
+				scrollPercent = (scrollPos * 100) / maxScroll
+			}
 			help = append(help, scrollStyle.Render(fmt.Sprintf("Scroll: %d%%", scrollPercent)))
 		}
+	}
+
+	if m.err != nil {
+		errorStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("196")).
+			Bold(true)
+		help = append(help, errorStyle.Render("Error: "+m.err.Error()))
 	}
 
 	return footerStyle.Render(strings.Join(help, " • "))

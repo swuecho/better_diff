@@ -269,6 +269,19 @@ func TestGetTotalStatsEmpty(t *testing.T) {
 	}
 }
 
+func TestVisibleContentRows(t *testing.T) {
+	model := setupModel(t)
+	model.height = 24
+	if got := model.visibleContentRows(); got != 19 {
+		t.Errorf("visibleContentRows() = %d, want 19", got)
+	}
+
+	model.height = 3
+	if got := model.visibleContentRows(); got != 1 {
+		t.Errorf("visibleContentRows() with tiny height = %d, want 1", got)
+	}
+}
+
 func TestFilesLoadedMsg(t *testing.T) {
 	model := setupModel(t)
 

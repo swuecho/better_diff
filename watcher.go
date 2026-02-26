@@ -50,6 +50,7 @@ func NewWatcher(rootPath string) (*Watcher, error) {
 		w.gitPath,
 		filepath.Join(w.gitPath, "HEAD"),
 		filepath.Join(w.gitPath, "index"),
+		filepath.Join(w.gitPath, "refs"),
 		filepath.Join(w.gitPath, "refs", "heads"),
 		filepath.Join(w.gitPath, "refs", "tags"),
 	}

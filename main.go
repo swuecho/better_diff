@@ -3,11 +3,18 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+const appVersion = "1.0.0"
+
 func main() {
+	if handled := handleCLIArgs(os.Args[1:]); handled {
+		return
+	}
+
 	// Initialize git service
 	gitService, err := NewGitService()
 	if err != nil {
@@ -27,7 +34,7 @@ func main() {
 	defer logger.Close()
 
 	logger.Info("better_diff starting", map[string]interface{}{
-		"version": "1.0.0",
+		"version": appVersion,
 	})
 
 	// Create model with dependency injection
@@ -55,4 +62,26 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Warnings: %d\n", stats.TotalWarnings)
 		}
 	}
+}
+
+func handleCLIArgs(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+
+	if isHelpArg(args[0]) {
+		fmt.Printf("better_diff %s\n", appVersion)
+		return true
+	}
+
+	if len(args) >= 2 && strings.EqualFold(args[0], "diff") && isHelpArg(args[1]) {
+		fmt.Printf("better_diff %s\n", appVersion)
+		return true
+	}
+
+	return false
+}
+
+func isHelpArg(arg string) bool {
+	return strings.EqualFold(arg, "help") || arg == "-h" || arg == "--help"
 }

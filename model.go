@@ -206,43 +206,24 @@ func (m Model) LoadCommitDiff(commitHash string) tea.Cmd {
 	}
 }
 
-// LoadBranchCompareDiff loads commit, staged, and unstaged diffs together.
+// LoadBranchCompareDiff loads a unified diff against default branch.
 func (m Model) LoadBranchCompareDiff(commits []Commit) tea.Cmd {
 	return func() tea.Msg {
 		if m.git == nil {
 			return errMsg{&ServiceError{Message: "Git service not initialized"}}
 		}
 
-		var all []FileDiff
-
-		// Include all commit diffs.
-		for _, commit := range commits {
-			files, err := m.git.GetCommitDiff(commit.Hash, m.logger)
-			if err != nil {
-				if m.logger != nil {
-					m.logger.Error("Failed to get commit diff for branch compare", err, map[string]interface{}{
-						"commit": commit.Hash,
-					})
-				}
-				return errMsg{err}
-			}
-
-			all = append(all, files...)
-		}
-
-		// Include staged and unstaged working changes.
-		staged, unstaged, err := m.git.GetBranchCompareDiffs(m.diffViewMode, m.diffContext, m.logger)
+		files, err := m.git.GetUnifiedBranchCompareDiff(m.diffViewMode, m.diffContext, m.logger)
 		if err != nil {
 			if m.logger != nil {
-				m.logger.Error("Failed to get staged/unstaged diffs for branch compare", err, nil)
+				m.logger.Error("Failed to get unified branch compare diff", err, map[string]interface{}{
+					"commit_count": len(commits),
+				})
 			}
 			return errMsg{err}
 		}
 
-		all = append(all, staged...)
-		all = append(all, unstaged...)
-
-		return allDiffsLoadedMsg{all}
+		return allDiffsLoadedMsg{files}
 	}
 }
 

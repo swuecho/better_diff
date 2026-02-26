@@ -130,7 +130,7 @@ func (m Model) renderHelp() string {
 
 	// Footer
 	content.WriteString("\n")
-	footer := subtleStyle.Render("Press ? or q to close")
+	footer := subtleStyle.Render("Press ? to close")
 	content.WriteString(footer)
 
 	// Center the modal
