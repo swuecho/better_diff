@@ -43,7 +43,6 @@ func (m Model) View() string {
 }
 
 func (m Model) renderHeader() string {
-	// Build header
 	var parts []string
 
 	if m.branch != "" {
@@ -55,46 +54,21 @@ func (m Model) renderHeader() string {
 		parts = append(parts, subtleStyle.Render(m.rootPath))
 	}
 
-	modeText := "Unstaged"
-	if m.diffMode == Staged {
-		modeText = "Staged"
-	} else if m.diffMode == BranchCompare {
-		modeText = "Branch Compare"
-	}
-	parts = append(parts, modeIndicatorStyle.Render("["+modeText+"]"))
+	parts = append(parts, modeIndicatorStyle.Render("["+m.diffModeLabel()+"]"))
 
-	// Add view mode indicator
-	viewModeText := "Diff Only"
-	if m.diffViewMode == WholeFile {
-		viewModeText = "Whole File"
-	}
-	parts = append(parts, viewModeIndicatorStyle.Render("["+viewModeText+"]"))
+	parts = append(parts, viewModeIndicatorStyle.Render("["+m.diffViewModeLabel()+"]"))
 
-	// Add summary statistics
 	files, added, removed := m.GetTotalStats()
 	if files > 0 {
-		var stats string
-		if added > 0 && removed > 0 {
-			stats = fmt.Sprintf("%d files, +%d/-%d", files, added, removed)
-		} else if added > 0 {
-			stats = fmt.Sprintf("%d files, +%d", files, added)
-		} else if removed > 0 {
-			stats = fmt.Sprintf("%d files, -%d", files, removed)
-		} else {
-			stats = fmt.Sprintf("%d files", files)
-		}
+		stats := formatAggregateStats(files, added, removed)
 		parts = append(parts, statsSubtleStyle.Render("("+stats+")"))
 	}
 
-	// Add help hint
 	if !m.showHelp {
 		parts = append(parts, subtleStyle.Render("Press ? for help"))
 	}
 
-	// Join with spacing
 	header := strings.Join(parts, " ")
-
-	// Add separator
 	separator := headerSeparatorStyle.Render(strings.Repeat("─", m.width))
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, separator)
@@ -158,16 +132,10 @@ func (m Model) renderFileTree(width, height int) string {
 			prefix += "  "
 		}
 
-		// Style based on type
-		var text string
-		var style lipgloss.Style
-
+		text := node.name
+		style := fileStyle
 		if node.isDir {
-			text = node.name
 			style = dirStyle
-		} else {
-			text = node.name
-			style = fileStyle
 		}
 
 		// Add change indicator
@@ -194,16 +162,8 @@ func (m Model) renderFileTree(width, height int) string {
 
 		line := prefix + indicator + " " + text
 
-		// Add line statistics for non-dir nodes
 		if !node.isDir && (node.linesAdded > 0 || node.linesRemoved > 0) {
-			stats := ""
-			if node.linesAdded > 0 && node.linesRemoved > 0 {
-				stats = fmt.Sprintf(" +%d/-%d", node.linesAdded, node.linesRemoved)
-			} else if node.linesAdded > 0 {
-				stats = fmt.Sprintf(" +%d", node.linesAdded)
-			} else if node.linesRemoved > 0 {
-				stats = fmt.Sprintf(" -%d", node.linesRemoved)
-			}
+			stats := formatLineStats(node.linesAdded, node.linesRemoved)
 			line += statsStyle.Render(stats)
 		}
 
@@ -385,6 +345,48 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func (m Model) diffModeLabel() string {
+	switch m.diffMode {
+	case Staged:
+		return "Staged"
+	case BranchCompare:
+		return "Branch Compare"
+	default:
+		return "Unstaged"
+	}
+}
+
+func (m Model) diffViewModeLabel() string {
+	if m.diffViewMode == WholeFile {
+		return "Whole File"
+	}
+	return "Diff Only"
+}
+
+func formatAggregateStats(fileCount, linesAdded, linesRemoved int) string {
+	switch {
+	case linesAdded > 0 && linesRemoved > 0:
+		return fmt.Sprintf("%d files, +%d/-%d", fileCount, linesAdded, linesRemoved)
+	case linesAdded > 0:
+		return fmt.Sprintf("%d files, +%d", fileCount, linesAdded)
+	case linesRemoved > 0:
+		return fmt.Sprintf("%d files, -%d", fileCount, linesRemoved)
+	default:
+		return fmt.Sprintf("%d files", fileCount)
+	}
+}
+
+func formatLineStats(linesAdded, linesRemoved int) string {
+	switch {
+	case linesAdded > 0 && linesRemoved > 0:
+		return fmt.Sprintf(" +%d/-%d", linesAdded, linesRemoved)
+	case linesAdded > 0:
+		return fmt.Sprintf(" +%d", linesAdded)
+	default:
+		return fmt.Sprintf(" -%d", linesRemoved)
+	}
 }
 
 // renderHelpModal renders the help modal overlay

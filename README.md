@@ -77,6 +77,10 @@ better_diff/
 
 ## Development
 
+### Code Style
+
+Use the repository code standards in [CODE_STYLE.md](CODE_STYLE.md) during implementation and review.
+
 ### Dependencies
 
 - [BubbleTea](https://github.com/charmbracelet/bubbletea) - TUI framework

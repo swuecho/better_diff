@@ -69,17 +69,28 @@ func handleCLIArgs(args []string) bool {
 		return false
 	}
 
-	if isHelpArg(args[0]) {
-		fmt.Printf("better_diff %s\n", appVersion)
-		return true
-	}
-
-	if len(args) >= 2 && strings.EqualFold(args[0], "diff") && isHelpArg(args[1]) {
-		fmt.Printf("better_diff %s\n", appVersion)
+	if shouldPrintVersion(args) {
+		printVersion()
 		return true
 	}
 
 	return false
+}
+
+func shouldPrintVersion(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+
+	if isHelpArg(args[0]) {
+		return true
+	}
+
+	return len(args) >= 2 && strings.EqualFold(args[0], "diff") && isHelpArg(args[1])
+}
+
+func printVersion() {
+	fmt.Printf("better_diff %s\n", appVersion)
 }
 
 func isHelpArg(arg string) bool {
