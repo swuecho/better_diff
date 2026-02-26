@@ -16,7 +16,6 @@ import (
 
 var errStopCommitIteration = errors.New("stop commit iteration")
 
-// sortStrings sorts a slice of strings in place
 func sortStrings(items []string) {
 	sort.Strings(items)
 }
@@ -62,6 +61,24 @@ func changeTypeForMode(mode DiffMode, status git.Status, path string, fileStatus
 		return Added
 	}
 	return statusCodeToChangeType(statusCodeForMode(mode, *fileStatus))
+}
+
+func sortedStatusPaths(status git.Status) []string {
+	paths := make([]string, 0, len(status))
+	for path := range status {
+		paths = append(paths, path)
+	}
+	sortStrings(paths)
+	return paths
+}
+
+func sortedPathsFromSet(pathSet map[string]struct{}) []string {
+	paths := make([]string, 0, len(pathSet))
+	for path := range pathSet {
+		paths = append(paths, path)
+	}
+	sortStrings(paths)
+	return paths
 }
 
 // GitService encapsulates all git operations
@@ -135,12 +152,7 @@ func (gs *GitService) GetChangedFiles(mode DiffMode) ([]FileDiff, error) {
 		return nil, fmt.Errorf("failed to get git status: %w", err)
 	}
 
-	// Collect paths and sort them for stable ordering
-	paths := make([]string, 0, len(status))
-	for path := range status {
-		paths = append(paths, path)
-	}
-	sortStrings(paths)
+	paths := sortedStatusPaths(status)
 
 	var files []FileDiff
 	for _, path := range paths {
@@ -173,52 +185,25 @@ func (gs *GitService) GetDiffWithContext(mode DiffMode, viewMode DiffViewMode, c
 		return nil, fmt.Errorf("failed to get worktree: %w", err)
 	}
 
-	var headCommit *object.Commit
-	if mode == Staged {
-		// Staged mode needs HEAD for index-vs-HEAD comparisons.
-		head, err := gs.repo.Head()
-		if err != nil {
-			if isObjectNotFoundError(err) {
-				if logger != nil {
-					logger.Warn("Skipping staged diff load: HEAD not available", nil)
-				}
-				return []FileDiff{}, nil
-			}
-			return nil, fmt.Errorf("failed to get HEAD: %w", err)
-		}
-
-		headCommit, err = gs.repo.CommitObject(head.Hash())
-		if err != nil {
-			if isObjectNotFoundError(err) {
-				if logger != nil {
-					logger.Warn("Skipping staged diff load: HEAD commit object missing", nil)
-				}
-				return []FileDiff{}, nil
-			}
-			return nil, fmt.Errorf("failed to get HEAD commit: %w", err)
-		}
+	headCommit, shouldSkip, err := gs.getHeadCommitForDiffMode(mode, logger)
+	if err != nil {
+		return nil, err
+	}
+	if shouldSkip {
+		return []FileDiff{}, nil
 	}
 
-	// Get status to find changed files
-	status, err := worktree.Status()
+	status, shouldSkip, err := getWorktreeStatusForDiff(worktree, logger)
 	if err != nil {
-		if isObjectNotFoundError(err) {
-			if logger != nil {
-				logger.Warn("Skipping diff load: git status unavailable", nil)
-			}
-			return []FileDiff{}, nil
-		}
-		return nil, fmt.Errorf("failed to get git status: %w", err)
+		return nil, err
+	}
+	if shouldSkip {
+		return []FileDiff{}, nil
 	}
 
 	var files []FileDiff
 
-	// Collect and sort paths for stable ordering
-	paths := make([]string, 0, len(status))
-	for path := range status {
-		paths = append(paths, path)
-	}
-	sortStrings(paths)
+	paths := sortedStatusPaths(status)
 
 	// Get the index for staging area contents
 	idx, err := gs.repo.Storer.Index()
@@ -250,6 +235,51 @@ func (gs *GitService) GetDiffWithContext(mode DiffMode, viewMode DiffViewMode, c
 	}
 
 	return files, nil
+}
+
+func (gs *GitService) getHeadCommitForDiffMode(mode DiffMode, logger *Logger) (*object.Commit, bool, error) {
+	if mode != Staged {
+		return nil, false, nil
+	}
+
+	head, err := gs.repo.Head()
+	if err != nil {
+		if isObjectNotFoundError(err) {
+			if logger != nil {
+				logger.Warn("Skipping staged diff load: HEAD not available", nil)
+			}
+			return nil, true, nil
+		}
+		return nil, false, fmt.Errorf("failed to get HEAD: %w", err)
+	}
+
+	headCommit, err := gs.repo.CommitObject(head.Hash())
+	if err != nil {
+		if isObjectNotFoundError(err) {
+			if logger != nil {
+				logger.Warn("Skipping staged diff load: HEAD commit object missing", nil)
+			}
+			return nil, true, nil
+		}
+		return nil, false, fmt.Errorf("failed to get HEAD commit: %w", err)
+	}
+
+	return headCommit, false, nil
+}
+
+func getWorktreeStatusForDiff(worktree *git.Worktree, logger *Logger) (git.Status, bool, error) {
+	status, err := worktree.Status()
+	if err != nil {
+		if isObjectNotFoundError(err) {
+			if logger != nil {
+				logger.Warn("Skipping diff load: git status unavailable", nil)
+			}
+			return nil, true, nil
+		}
+		return nil, false, fmt.Errorf("failed to get git status: %w", err)
+	}
+
+	return status, false, nil
 }
 
 // getFileDiff generates a FileDiff for a single file
@@ -622,25 +652,12 @@ func (gs *GitService) GetUnifiedBranchCompareDiff(viewMode DiffViewMode, context
 		return nil, fmt.Errorf("failed to get worktree: %w", err)
 	}
 
-	headRef, err := gs.repo.Head()
+	headCommit, shouldSkip, err := gs.getHeadCommitForBranchCompare(logger)
 	if err != nil {
-		if isObjectNotFoundError(err) {
-			if logger != nil {
-				logger.Warn("Skipping branch compare: HEAD not available", nil)
-			}
-			return []FileDiff{}, nil
-		}
-		return nil, fmt.Errorf("failed to get HEAD: %w", err)
+		return nil, err
 	}
-	headCommit, err := gs.repo.CommitObject(headRef.Hash())
-	if err != nil {
-		if isObjectNotFoundError(err) {
-			if logger != nil {
-				logger.Warn("Skipping branch compare: HEAD commit object missing", nil)
-			}
-			return []FileDiff{}, nil
-		}
-		return nil, fmt.Errorf("failed to get HEAD commit: %w", err)
+	if shouldSkip {
+		return []FileDiff{}, nil
 	}
 
 	baseCommit, err := gs.getDefaultBranchCommit()
@@ -659,63 +676,107 @@ func (gs *GitService) GetUnifiedBranchCompareDiff(viewMode DiffViewMode, context
 		return nil, err
 	}
 
-	effectiveContext := contextLines
-	if viewMode == WholeFile {
-		effectiveContext = WholeFileContext
-	}
+	effectiveContext := resolveEffectiveContextLines(viewMode, contextLines)
 
 	files := make([]FileDiff, 0, len(paths))
 	for _, path := range paths {
-		oldContent, oldExists, err := gs.readFileFromCommit(baseCommit, path, logger)
-		if err != nil {
-			if logger != nil {
-				logger.Error("Skipping file in branch compare: failed to read base content", err, map[string]interface{}{
-					"file": path,
-				})
-			}
-			continue
-		}
-		newContent, newExists, err := gs.readFileFromWorktree(worktree, path, logger)
-		if err != nil {
-			if logger != nil {
-				logger.Error("Skipping file in branch compare: failed to read worktree content", err, map[string]interface{}{
-					"file": path,
-				})
-			}
-			continue
-		}
-
-		if !oldExists && !newExists {
-			continue
-		}
-
-		hunks, err := computeHunksWithContext(splitLines(string(oldContent)), splitLines(string(newContent)), effectiveContext)
+		fileDiff, err := gs.buildUnifiedBranchCompareFileDiff(path, baseCommit, worktree, effectiveContext, logger)
 		if err != nil {
 			return nil, fmt.Errorf("failed to compute unified diff for %s: %w", path, err)
 		}
-		if len(hunks) == 0 {
+		if fileDiff == nil {
 			continue
 		}
-
-		changeType := Modified
-		if !oldExists && newExists {
-			changeType = Added
-		} else if oldExists && !newExists {
-			changeType = Deleted
-		}
-
-		linesAdded, linesRemoved := countHunkLineStats(hunks)
-
-		files = append(files, FileDiff{
-			Path:         path,
-			ChangeType:   changeType,
-			Hunks:        hunks,
-			LinesAdded:   linesAdded,
-			LinesRemoved: linesRemoved,
-		})
+		files = append(files, *fileDiff)
 	}
 
 	return files, nil
+}
+
+func (gs *GitService) getHeadCommitForBranchCompare(logger *Logger) (*object.Commit, bool, error) {
+	headRef, err := gs.repo.Head()
+	if err != nil {
+		if isObjectNotFoundError(err) {
+			if logger != nil {
+				logger.Warn("Skipping branch compare: HEAD not available", nil)
+			}
+			return nil, true, nil
+		}
+		return nil, false, fmt.Errorf("failed to get HEAD: %w", err)
+	}
+
+	headCommit, err := gs.repo.CommitObject(headRef.Hash())
+	if err != nil {
+		if isObjectNotFoundError(err) {
+			if logger != nil {
+				logger.Warn("Skipping branch compare: HEAD commit object missing", nil)
+			}
+			return nil, true, nil
+		}
+		return nil, false, fmt.Errorf("failed to get HEAD commit: %w", err)
+	}
+
+	return headCommit, false, nil
+}
+
+func resolveEffectiveContextLines(viewMode DiffViewMode, contextLines int) int {
+	if viewMode == WholeFile {
+		return WholeFileContext
+	}
+	return contextLines
+}
+
+func resolveBranchCompareChangeType(oldExists, newExists bool) ChangeType {
+	if !oldExists && newExists {
+		return Added
+	}
+	if oldExists && !newExists {
+		return Deleted
+	}
+	return Modified
+}
+
+func (gs *GitService) buildUnifiedBranchCompareFileDiff(path string, baseCommit *object.Commit, worktree *git.Worktree, contextLines int, logger *Logger) (*FileDiff, error) {
+	oldContent, oldExists, err := gs.readFileFromCommit(baseCommit, path, logger)
+	if err != nil {
+		if logger != nil {
+			logger.Error("Skipping file in branch compare: failed to read base content", err, map[string]interface{}{
+				"file": path,
+			})
+		}
+		return nil, nil
+	}
+
+	newContent, newExists, err := gs.readFileFromWorktree(worktree, path, logger)
+	if err != nil {
+		if logger != nil {
+			logger.Error("Skipping file in branch compare: failed to read worktree content", err, map[string]interface{}{
+				"file": path,
+			})
+		}
+		return nil, nil
+	}
+
+	if !oldExists && !newExists {
+		return nil, nil
+	}
+
+	hunks, err := computeHunksWithContext(splitLines(string(oldContent)), splitLines(string(newContent)), contextLines)
+	if err != nil {
+		return nil, err
+	}
+	if len(hunks) == 0 {
+		return nil, nil
+	}
+
+	linesAdded, linesRemoved := countHunkLineStats(hunks)
+	return &FileDiff{
+		Path:         path,
+		ChangeType:   resolveBranchCompareChangeType(oldExists, newExists),
+		Hunks:        hunks,
+		LinesAdded:   linesAdded,
+		LinesRemoved: linesRemoved,
+	}, nil
 }
 
 func (gs *GitService) getDefaultBranchCommit() (*object.Commit, error) {
@@ -760,12 +821,7 @@ func (gs *GitService) collectBranchComparePaths(baseCommit, headCommit *object.C
 	status, err := worktree.Status()
 	if err != nil {
 		if isObjectNotFoundError(err) {
-			paths := make([]string, 0, len(pathSet))
-			for path := range pathSet {
-				paths = append(paths, path)
-			}
-			sortStrings(paths)
-			return paths, nil
+			return sortedPathsFromSet(pathSet), nil
 		}
 		return nil, fmt.Errorf("failed to get worktree status: %w", err)
 	}
@@ -775,12 +831,7 @@ func (gs *GitService) collectBranchComparePaths(baseCommit, headCommit *object.C
 		}
 	}
 
-	paths := make([]string, 0, len(pathSet))
-	for path := range pathSet {
-		paths = append(paths, path)
-	}
-	sortStrings(paths)
-	return paths, nil
+	return sortedPathsFromSet(pathSet), nil
 }
 
 func (gs *GitService) readFileFromCommit(commit *object.Commit, path string, logger *Logger) ([]byte, bool, error) {
@@ -801,15 +852,8 @@ func (gs *GitService) readFileFromCommit(commit *object.Commit, path string, log
 	if err != nil {
 		return nil, false, fmt.Errorf("failed to read file %s from base commit: %w", path, err)
 	}
-	if len(content) > MaxFileSize {
-		if logger != nil {
-			logger.Warn("Base file too large to diff", map[string]interface{}{
-				"file": path,
-				"size": len(content),
-				"max":  MaxFileSize,
-			})
-		}
-		return nil, false, fmt.Errorf("file %s too large to diff (%d > %d)", path, len(content), MaxFileSize)
+	if err := enforceSizeLimit(path, content, logger, "Base file too large to diff", "file %s too large to diff (%d > %d)"); err != nil {
+		return nil, false, err
 	}
 	return content, true, nil
 }
@@ -827,41 +871,23 @@ func (gs *GitService) readFileFromWorktree(worktree *git.Worktree, path string, 
 	if err != nil {
 		return nil, false, fmt.Errorf("failed to read file %s from worktree: %w", path, err)
 	}
-	if len(content) > MaxFileSize {
-		if logger != nil {
-			logger.Warn("Worktree file too large to diff", map[string]interface{}{
-				"file": path,
-				"size": len(content),
-				"max":  MaxFileSize,
-			})
-		}
-		return nil, false, fmt.Errorf("file %s too large to diff (%d > %d)", path, len(content), MaxFileSize)
+	if err := enforceSizeLimit(path, content, logger, "Worktree file too large to diff", "file %s too large to diff (%d > %d)"); err != nil {
+		return nil, false, err
 	}
 	return content, true, nil
 }
 
 // GetCommitDiff gets the diff for a specific commit (compares commit to its parent)
 func (gs *GitService) GetCommitDiff(commitHash string, logger *Logger) ([]FileDiff, error) {
-	// Get the commit object
-	hash := plumbing.NewHash(commitHash)
-	commit, err := gs.repo.CommitObject(hash)
+	commit, parentCommit, err := gs.resolveCommitAndParent(commitHash)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get commit: %w", err)
-	}
-
-	// Get parent commit
-	var parentCommit *object.Commit
-	if len(commit.ParentHashes) > 0 {
-		parentCommit, err = gs.repo.CommitObject(commit.ParentHashes[0])
-		if err != nil {
-			return nil, fmt.Errorf("failed to get parent commit: %w", err)
+		if errors.Is(err, object.ErrParentNotFound) {
+			// First commit has no parent, so there is no parent-based diff.
+			return []FileDiff{}, nil
 		}
-	} else {
-		// This is the first commit (no parent), return empty
-		return []FileDiff{}, nil
+		return nil, err
 	}
 
-	// Get the patch as a string for debugging
 	patch, err := parentCommit.Patch(commit)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get patch: %w", err)
@@ -874,21 +900,32 @@ func (gs *GitService) GetCommitDiff(commitHash string, logger *Logger) ([]FileDi
 		})
 	}
 
-	// Convert patch to FileDiffs
-	var files []FileDiff
-	for _, filePatch := range patch.FilePatches() {
-		from, to := filePatch.Files()
-		path := "unknown"
-		changeType := Modified
+	return convertPatchToFileDiffs(patch.FilePatches(), logger, commitHash), nil
+}
 
-		if from != nil {
-			path = from.Path()
-		}
-		if to != nil {
-			path = to.Path()
-		}
+func (gs *GitService) resolveCommitAndParent(commitHash string) (*object.Commit, *object.Commit, error) {
+	commit, err := gs.repo.CommitObject(plumbing.NewHash(commitHash))
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get commit: %w", err)
+	}
 
-		// Generate hunks from patch
+	if len(commit.ParentHashes) == 0 {
+		return nil, nil, object.ErrParentNotFound
+	}
+
+	parentCommit, err := gs.repo.CommitObject(commit.ParentHashes[0])
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get parent commit: %w", err)
+	}
+
+	return commit, parentCommit, nil
+}
+
+func convertPatchToFileDiffs(filePatches []diff.FilePatch, logger *Logger, commitHash string) []FileDiff {
+	files := make([]FileDiff, 0, len(filePatches))
+
+	for _, filePatch := range filePatches {
+		path := filePatchPath(filePatch)
 		hunks, err := convertPatchToHunks(filePatch)
 		if err != nil {
 			if logger != nil {
@@ -900,13 +937,11 @@ func (gs *GitService) GetCommitDiff(commitHash string, logger *Logger) ([]FileDi
 			continue
 		}
 
-		// Skip files with no hunks (no actual changes)
 		if len(hunks) == 0 {
 			continue
 		}
 
 		linesAdded, linesRemoved := countHunkLineStats(hunks)
-
 		if logger != nil {
 			logger.Info("Processed file patch", map[string]interface{}{
 				"path":          path,
@@ -918,7 +953,7 @@ func (gs *GitService) GetCommitDiff(commitHash string, logger *Logger) ([]FileDi
 
 		files = append(files, FileDiff{
 			Path:         path,
-			ChangeType:   changeType,
+			ChangeType:   Modified,
 			Hunks:        hunks,
 			LinesAdded:   linesAdded,
 			LinesRemoved: linesRemoved,
@@ -932,7 +967,18 @@ func (gs *GitService) GetCommitDiff(commitHash string, logger *Logger) ([]FileDi
 		})
 	}
 
-	return files, nil
+	return files
+}
+
+func filePatchPath(filePatch diff.FilePatch) string {
+	from, to := filePatch.Files()
+	if to != nil && to.Path() != "" {
+		return to.Path()
+	}
+	if from != nil && from.Path() != "" {
+		return from.Path()
+	}
+	return "unknown"
 }
 
 // convertPatchToHunks converts a git Patch to our Hunk format
