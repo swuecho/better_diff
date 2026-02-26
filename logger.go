@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,6 +46,7 @@ type Logger struct {
 	quiet  bool
 	stats  *ErrorStats
 	file   *os.File
+	logger *slog.Logger
 }
 
 // ErrorStats tracks error statistics
@@ -57,11 +60,13 @@ type ErrorStats struct {
 }
 
 func newDefaultLogger(level LogLevel) *Logger {
-	return &Logger{
+	logger := &Logger{
 		level:  level,
 		output: os.Stderr,
 		stats:  &ErrorStats{ByType: make(map[string]int)},
 	}
+	logger.rebuildSlogLoggerLocked()
+	return logger
 }
 
 // NewLogger creates a new logger with the specified level
@@ -83,6 +88,7 @@ func NewLogger(level LogLevel, gitRootPath string) (*Logger, error) {
 			if err == nil {
 				logger.output = file
 				logger.file = file
+				logger.rebuildSlogLoggerLocked()
 				return logger, nil
 			}
 		}
@@ -92,6 +98,7 @@ func NewLogger(level LogLevel, gitRootPath string) (*Logger, error) {
 
 	logger.output = file
 	logger.file = file
+	logger.rebuildSlogLoggerLocked()
 	return logger, nil
 }
 
@@ -100,11 +107,18 @@ func openLogFile(path string) (*os.File, error) {
 	return os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, logFilePermission)
 }
 
+func (l *Logger) rebuildSlogLoggerLocked() {
+	l.logger = slog.New(slog.NewTextHandler(l.output, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}))
+}
+
 // SetOutput sets the output destination for log messages
 func (l *Logger) SetOutput(w io.Writer) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.output = w
+	l.rebuildSlogLoggerLocked()
 }
 
 // SetLevel sets the minimum log level
@@ -140,61 +154,21 @@ func (l *Logger) log(level LogLevel, msg string, err error, fields map[string]an
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	// Check if we should log this level
-	if level < l.level {
+	if !l.shouldLog(level) {
 		return
 	}
 
-	// In quiet mode, only show errors
-	if l.quiet && level < ERROR {
-		return
-	}
+	l.updateStats(level, msg, err)
 
-	// Update stats
-	if level >= ERROR {
-		l.stats.mu.Lock()
-		l.stats.TotalErrors++
-		if err != nil {
-			errType := fmt.Sprintf("%T", err)
-			l.stats.ByType[errType]++
-		}
-		l.stats.LastError = msg
-		if err != nil {
-			l.stats.LastError += ": " + err.Error()
-		}
-		l.stats.LastErrorTime = time.Now()
-		l.stats.mu.Unlock()
-	} else if level == WARN {
-		l.stats.mu.Lock()
-		l.stats.TotalWarnings++
-		l.stats.mu.Unlock()
-	}
-
-	// Build log message
-	timestamp := time.Now().Format("2006-01-02 15:04:05")
-	message := fmt.Sprintf("%s [%s] %s", timestamp, level.String(), msg)
-
-	// Add error if present
+	args := make([]any, 0, len(fields)+2)
 	if err != nil {
-		message += fmt.Sprintf(": %v", err)
+		args = append(args, "error", err)
+	}
+	for _, key := range sortedFieldKeys(fields) {
+		args = append(args, key, fields[key])
 	}
 
-	// Add fields if present
-	if len(fields) > 0 {
-		message += " {"
-		keys := sortedFieldKeys(fields)
-		for i, k := range keys {
-			if i > 0 {
-				message += ", "
-			}
-			v := fields[k]
-			message += fmt.Sprintf("%s: %v", k, v)
-		}
-		message += "}"
-	}
-
-	// Write output
-	fmt.Fprintln(l.output, message)
+	l.logger.Log(context.Background(), toSlogLevel(level), msg, args...)
 }
 
 // Debug logs a debug message
@@ -239,6 +213,54 @@ func (l *Logger) Errorf(format string, args ...any) {
 
 func (l *Logger) logf(level LogLevel, format string, args ...any) {
 	l.log(level, fmt.Sprintf(format, args...), nil, nil)
+}
+
+func (l *Logger) shouldLog(level LogLevel) bool {
+	if level < l.level {
+		return false
+	}
+	if l.quiet && level < ERROR {
+		return false
+	}
+	return true
+}
+
+func (l *Logger) updateStats(level LogLevel, msg string, err error) {
+	l.stats.mu.Lock()
+	defer l.stats.mu.Unlock()
+
+	if level >= ERROR {
+		l.stats.TotalErrors++
+		if err != nil {
+			errType := fmt.Sprintf("%T", err)
+			l.stats.ByType[errType]++
+		}
+		l.stats.LastError = msg
+		if err != nil {
+			l.stats.LastError += ": " + err.Error()
+		}
+		l.stats.LastErrorTime = time.Now()
+		return
+	}
+
+	if level == WARN {
+		l.stats.TotalWarnings++
+	}
+}
+
+func toSlogLevel(level LogLevel) slog.Level {
+	switch level {
+	case DEBUG:
+		return slog.LevelDebug
+	case INFO:
+		return slog.LevelInfo
+	case WARN:
+		return slog.LevelWarn
+	case ERROR:
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
 }
 
 // HasErrors returns true if any errors have been logged
