@@ -18,178 +18,178 @@ type dirNode struct {
 
 // Update implements tea.Model
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
+	switch typed := msg.(type) {
 	case tea.KeyMsg:
-		// Any key other than "g" clears pending "gg" state.
-		if msg.String() != "g" {
-			m.vimPendingG = false
+		return m.handleKeyMsg(typed)
+	case tea.WindowSizeMsg:
+		m.width = typed.Width
+		m.height = typed.Height
+		return m, nil
+	default:
+		return m.handleAsyncMsg(typed)
+	}
+}
+
+func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	key := msg.String()
+
+	// Any key other than "g" clears pending "gg" state.
+	if key != "g" {
+		m.vimPendingG = false
+	}
+
+	// When help is visible, only allow help toggle and quit keys.
+	if m.showHelp && key != "?" && key != "q" && key != "ctrl+c" {
+		return m, nil
+	}
+
+	switch key {
+	case "q", "ctrl+c":
+		if m.watcher != nil {
+			_ = m.watcher.Close()
 		}
-
-		// When help is visible, only allow help toggle and quit keys.
-		if m.showHelp && msg.String() != "?" && msg.String() != "q" && msg.String() != "ctrl+c" {
-			return m, nil
+		m.quitting = true
+		return m, tea.Quit
+	case "up", "k":
+		if m.panel == DiffPanel {
+			if key == "k" && m.diffViewMode == DiffOnly {
+				m.jumpToPrevHunk()
+			} else {
+				m.moveDiffUp()
+			}
+		} else {
+			m.moveUp()
 		}
-
-		switch msg.String() {
-		case "q", "ctrl+c":
-			if m.watcher != nil {
-				_ = m.watcher.Close()
-			}
-			m.quitting = true
-			return m, tea.Quit
-
-		case "up", "k":
-			if m.panel == DiffPanel {
-				if msg.String() == "k" && m.diffViewMode == DiffOnly {
-					m.jumpToPrevHunk()
-				} else {
-					m.moveDiffUp()
-				}
+		return m, nil
+	case "down", "j":
+		if m.panel == DiffPanel {
+			if key == "j" && m.diffViewMode == DiffOnly {
+				m.jumpToNextHunk()
 			} else {
-				m.moveUp()
+				m.moveDiffDown()
 			}
-			return m, nil
-
-		case "down", "j":
-			if m.panel == DiffPanel {
-				if msg.String() == "j" && m.diffViewMode == DiffOnly {
-					m.jumpToNextHunk()
-				} else {
-					m.moveDiffDown()
-				}
+		} else {
+			m.moveDown()
+		}
+		return m, nil
+	case "pgup":
+		if m.panel == DiffPanel {
+			m.moveDiffPageUp()
+		} else {
+			m.movePageUp()
+		}
+		return m, nil
+	case "pgdown":
+		if m.panel == DiffPanel {
+			m.moveDiffPageDown()
+		} else {
+			m.movePageDown()
+		}
+		return m, nil
+	case "g":
+		// Vim-style: "gg" jumps to top in whole-file/diff panel navigation.
+		if m.diffViewMode == WholeFile || m.panel == DiffPanel {
+			if m.vimPendingG {
+				m.moveDiffToTop()
+				m.vimPendingG = false
 			} else {
-				m.moveDown()
+				m.vimPendingG = true
 			}
-			return m, nil
-
-		case "pgup":
-			if m.panel == DiffPanel {
-				m.moveDiffPageUp()
-			} else {
-				m.movePageUp()
-			}
-			return m, nil
-
-		case "pgdown":
-			if m.panel == DiffPanel {
-				m.moveDiffPageDown()
-			} else {
-				m.movePageDown()
-			}
-			return m, nil
-
-		case "g":
-			// Vim-style: "gg" jumps to top in whole-file/diff panel navigation.
-			if m.diffViewMode == WholeFile || m.panel == DiffPanel {
-				if m.vimPendingG {
-					m.moveDiffToTop()
-					m.vimPendingG = false
-				} else {
-					m.vimPendingG = true
-				}
-				return m, nil
-			}
-			return m, nil
-
-		case "G":
-			// Vim-style: "G" jumps to bottom in whole-file/diff panel navigation.
-			if m.diffViewMode == WholeFile || m.panel == DiffPanel {
-				m.moveDiffToBottom()
-				return m, nil
-			}
-			return m, nil
-
-		case "tab":
-			// Don't allow switching to file tree panel in whole file mode
-			if m.diffViewMode == WholeFile {
-				return m, nil
-			}
+		}
+		return m, nil
+	case "G":
+		// Vim-style: "G" jumps to bottom in whole-file/diff panel navigation.
+		if m.diffViewMode == WholeFile || m.panel == DiffPanel {
+			m.moveDiffToBottom()
+		}
+		return m, nil
+	case "tab":
+		// Don't allow switching to file tree panel in whole file mode.
+		if m.diffViewMode != WholeFile {
 			if m.panel == FileTreePanel {
 				m.panel = DiffPanel
 			} else {
 				m.panel = FileTreePanel
 			}
-			return m, nil
-
-		case "enter", " ":
-			if m.panel == FileTreePanel {
-				cmd := m.selectItem()
-				return m, cmd
-			}
-			return m, nil
-
-		case "s":
-			// Toggle between staged, unstaged, and branch compare
-			if m.diffMode == Unstaged {
-				m.diffMode = Staged
-			} else if m.diffMode == Staged {
-				m.diffMode = BranchCompare
-			} else {
-				m.diffMode = Unstaged
-			}
-			m.selectedIndex = 0
-			m.scrollOffset = 0
-			m.diffScroll = 0
-			m.diffFiles = nil
-			m.files = nil          // Clear to force reload
-			m.commits = nil        // Clear commits
-			m.selectedCommit = nil // Clear selected commit
-
-			if m.diffMode == BranchCompare {
-				return m, tea.Batch(m.LoadCommitsAhead(), m.LoadBranchCompareDiff(nil))
-			}
-			return m, tea.Batch(m.LoadFiles(), m.LoadAllDiffs())
-
-		case "f":
-			// Toggle between diff-only and whole file view
-			if m.diffViewMode == DiffOnly {
-				m.diffViewMode = WholeFile
-				m.panel = DiffPanel // Auto-switch to diff panel
-			} else {
-				m.diffViewMode = DiffOnly
-			}
-			m.diffScroll = 0
-			m.diffFiles = nil
-			if m.diffMode == BranchCompare {
-				return m, tea.Batch(m.LoadCommitsAhead(), m.LoadBranchCompareDiff(m.commits))
-			}
-			return m, m.LoadAllDiffs()
-
-		case "o":
-			// Expand surrounding context in diff-only mode.
-			if m.diffViewMode == DiffOnly {
-				m.diffContext += DefaultDiffContext
-				return m, m.reloadCurrentDiffs()
-			}
-			return m, nil
-
-		case "O":
-			// Reset context expansion in diff-only mode.
-			if m.diffViewMode == DiffOnly {
-				m.diffContext = DefaultDiffContext
-				return m, m.reloadCurrentDiffs()
-			}
-			return m, nil
-
-		case "?":
-			// Toggle help screen
-			if m.showHelp {
-				m.showHelp = false
-			} else {
-				m.showHelp = true
-			}
+		}
+		return m, nil
+	case "enter", " ":
+		if m.panel != FileTreePanel {
 			return m, nil
 		}
-
-	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
+		return m, m.selectItem()
+	case "s":
+		return m, m.toggleDiffMode()
+	case "f":
+		return m, m.toggleDiffViewMode()
+	case "o":
+		// Expand surrounding context in diff-only mode.
+		if m.diffViewMode == DiffOnly {
+			m.diffContext += DefaultDiffContext
+			return m, m.reloadCurrentDiffs()
+		}
 		return m, nil
+	case "O":
+		// Reset context expansion in diff-only mode.
+		if m.diffViewMode == DiffOnly {
+			m.diffContext = DefaultDiffContext
+			return m, m.reloadCurrentDiffs()
+		}
+		return m, nil
+	case "?":
+		m.showHelp = !m.showHelp
+		return m, nil
+	default:
+		return m, nil
+	}
+}
 
+func (m *Model) toggleDiffMode() tea.Cmd {
+	switch m.diffMode {
+	case Unstaged:
+		m.diffMode = Staged
+	case Staged:
+		m.diffMode = BranchCompare
+	default:
+		m.diffMode = Unstaged
+	}
+
+	m.selectedIndex = 0
+	m.scrollOffset = 0
+	m.diffScroll = 0
+	m.diffFiles = nil
+	m.files = nil
+	m.commits = nil
+	m.selectedCommit = nil
+
+	if m.diffMode == BranchCompare {
+		return tea.Batch(m.LoadCommitsAhead(), m.LoadBranchCompareDiff(nil))
+	}
+	return tea.Batch(m.LoadFiles(), m.LoadAllDiffs())
+}
+
+func (m *Model) toggleDiffViewMode() tea.Cmd {
+	if m.diffViewMode == DiffOnly {
+		m.diffViewMode = WholeFile
+		m.panel = DiffPanel
+	} else {
+		m.diffViewMode = DiffOnly
+	}
+
+	m.diffScroll = 0
+	m.diffFiles = nil
+
+	if m.diffMode == BranchCompare {
+		return tea.Batch(m.LoadCommitsAhead(), m.LoadBranchCompareDiff(m.commits))
+	}
+	return m.LoadAllDiffs()
+}
+
+func (m Model) handleAsyncMsg(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch typed := msg.(type) {
 	case gitInfoMsg:
-		m.rootPath = msg.rootPath
-		m.branch = msg.branch
-		// Create and start file system watcher
+		m.rootPath = typed.rootPath
+		m.branch = typed.branch
 		watcher, err := NewWatcher(m.rootPath)
 		if err != nil {
 			if m.logger != nil {
@@ -198,20 +198,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.watcher = watcher
-		// Start watching for changes
 		return m, watcher.WaitForChange()
-
 	case FSChangeMsg:
-		// File system changed, check for actual changes
 		cmd := m.checkForChanges()
-		// Re-arm watcher exactly once per change event.
 		if m.watcher != nil {
 			return m, tea.Batch(cmd, m.watcher.WaitForChange())
 		}
 		return m, cmd
-
 	case filesLoadedMsg:
-		m.files = msg.files
+		m.files = typed.files
 		m.err = nil
 		if m.diffMode != BranchCompare && len(m.diffFiles) > 0 {
 			m.files = mergeFilesWithDiffStats(m.files, m.diffFiles)
@@ -219,86 +214,64 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastFileHash = computeFilesAndDiffHash(m.files, m.diffFiles)
 		m.buildFileTree()
 		return m, nil
-
 	case allDiffsLoadedMsg:
-		m.diffFiles = msg.files
+		m.diffFiles = typed.files
 		m.err = nil
 		if m.diffMode == BranchCompare {
-			m.lastFileHash = computeBranchCompareHash(msg.files, m.commits)
-			m.files = aggregateBranchCompareFiles(msg.files)
-			m.buildFileTree()
-			if m.selectedIndex >= len(m.flattenTree()) {
-				m.selectedIndex = 0
-			}
+			m.lastFileHash = computeBranchCompareHash(typed.files, m.commits)
+			m.files = aggregateBranchCompareFiles(typed.files)
 		} else {
-			m.files = mergeFilesWithDiffStats(m.files, msg.files)
-			m.lastFileHash = computeFilesAndDiffHash(m.files, msg.files)
-			m.buildFileTree()
-			if m.selectedIndex >= len(m.flattenTree()) {
-				m.selectedIndex = 0
-			}
+			m.files = mergeFilesWithDiffStats(m.files, typed.files)
+			m.lastFileHash = computeFilesAndDiffHash(m.files, typed.files)
+		}
+		m.buildFileTree()
+		if m.selectedIndex >= len(m.flattenTree()) {
+			m.selectedIndex = 0
 		}
 		return m, nil
-
 	case commitsLoadedMsg:
-		m.commits = msg.commits
+		m.commits = typed.commits
 		m.err = nil
-		m.selectedCommit = nil // Reset selected commit
+		m.selectedCommit = nil
 		return m, nil
-
 	case filesChangedMsg:
-		// Files have changed, reload everything
-		m.lastFileHash = msg.hash
+		m.lastFileHash = typed.hash
 		if m.diffMode != BranchCompare {
-			m.files = msg.files
+			m.files = typed.files
 			m.buildFileTree()
 		}
-		m.diffFiles = nil // Clear old diffs
-		// Reload diffs and continue watching
-		var cmd tea.Cmd
+		m.diffFiles = nil
 		if m.diffMode == BranchCompare {
-			cmd = tea.Batch(m.LoadCommitsAhead(), m.LoadBranchCompareDiff(m.commits))
-		} else {
-			cmd = m.LoadAllDiffs()
+			return m, tea.Batch(m.LoadCommitsAhead(), m.LoadBranchCompareDiff(m.commits))
 		}
-		return m, cmd
-
+		return m, m.LoadAllDiffs()
 	case diffLoadedMsg:
-		// Only add if the file has actual content (not empty)
-		if msg.file.Path != "" {
-			// Check if file already exists and replace it, otherwise append
-			found := false
-			for i := range m.diffFiles {
-				if m.diffFiles[i].Path == msg.file.Path {
-					m.diffFiles[i] = msg.file
-					found = true
-					break
-				}
-			}
-			if !found {
-				m.diffFiles = append(m.diffFiles, msg.file)
+		if typed.file.Path == "" {
+			return m, nil
+		}
+		for i := range m.diffFiles {
+			if m.diffFiles[i].Path == typed.file.Path {
+				m.diffFiles[i] = typed.file
+				return m, nil
 			}
 		}
+		m.diffFiles = append(m.diffFiles, typed.file)
 		return m, nil
-
 	case ShowHelpMsg:
 		m.showHelp = true
 		return m, nil
-
 	case HideHelpMsg:
 		m.showHelp = false
 		return m, nil
-
 	case errMsg:
-		m.err = msg.err
+		m.err = typed.err
 		return m, nil
-
 	case clearErrorMsg:
 		m.err = nil
 		return m, nil
+	default:
+		return m, nil
 	}
-
-	return m, nil
 }
 
 // moveUp moves the selection up

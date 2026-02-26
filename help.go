@@ -15,13 +15,6 @@ type KeyBinding struct {
 	Section string
 }
 
-// HelpModel represents the help modal
-type HelpModel struct {
-	visible bool
-	width   int
-	height  int
-}
-
 // All key bindings for the application
 var keyBindings = []KeyBinding{
 	// Navigation
@@ -69,21 +62,6 @@ type ShowHelpMsg struct{}
 
 // HideHelpMsg is a message to hide the help modal
 type HideHelpMsg struct{}
-
-// Update for help messages
-func (m Model) updateHelpMsg(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg.(type) {
-	case ShowHelpMsg:
-		m.showHelp = true
-		return m, nil
-
-	case HideHelpMsg:
-		m.showHelp = false
-		return m, nil
-	}
-
-	return m, nil
-}
 
 // renderHelp renders the help modal
 func (m Model) renderHelp() string {

@@ -7,6 +7,11 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+const (
+	headerRows = 2
+	footerRows = 1
+)
+
 // View implements tea.Model
 func (m Model) View() string {
 	if m.quitting {
@@ -19,9 +24,7 @@ func (m Model) View() string {
 	}
 
 	// Calculate dimensions
-	headerHeight := 2
-	footerHeight := 1
-	contentHeight := m.height - headerHeight - footerHeight
+	contentHeight := m.height - headerRows - footerRows
 	if contentHeight < 1 {
 		contentHeight = 1
 	}
@@ -58,20 +61,14 @@ func (m Model) renderHeader() string {
 	} else if m.diffMode == BranchCompare {
 		modeText = "Branch Compare"
 	}
-	modeStyle := lipgloss.NewStyle().
-		Foreground(colorYellow).
-		Bold(true)
-	parts = append(parts, modeStyle.Render("["+modeText+"]"))
+	parts = append(parts, modeIndicatorStyle.Render("["+modeText+"]"))
 
 	// Add view mode indicator
 	viewModeText := "Diff Only"
 	if m.diffViewMode == WholeFile {
 		viewModeText = "Whole File"
 	}
-	viewModeStyle := lipgloss.NewStyle().
-		Foreground(colorGreen86).
-		Bold(true)
-	parts = append(parts, viewModeStyle.Render("["+viewModeText+"]"))
+	parts = append(parts, viewModeIndicatorStyle.Render("["+viewModeText+"]"))
 
 	// Add summary statistics
 	files, added, removed := m.GetTotalStats()
@@ -98,9 +95,7 @@ func (m Model) renderHeader() string {
 	header := strings.Join(parts, " ")
 
 	// Add separator
-	separator := lipgloss.NewStyle().
-		Foreground(colorGray237).
-		Render(strings.Repeat("─", m.width))
+	separator := headerSeparatorStyle.Render(strings.Repeat("─", m.width))
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, separator)
 }
@@ -123,9 +118,7 @@ func (m Model) renderContent(height int) string {
 }
 
 func (m Model) renderFileTree(width, height int) string {
-	selectedStyle := lipgloss.NewStyle().
-		Background(lipgloss.Color("235")).
-		Width(width - 2)
+	selectedStyle := fileTreeSelectedLineStyle.Width(max(0, width-2))
 
 	// Calculate internal content height
 	internalHeight := height - 2
@@ -227,55 +220,10 @@ func (m Model) renderFileTree(width, height int) string {
 	content := strings.Join(lines, "\n")
 
 	// Apply panel styling with border
-	panelStyle := lipgloss.NewStyle().
-		Width(width).
-		Height(height).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("237")).
-		MaxWidth(width).
-		MaxHeight(height)
-
-	if m.panel == FileTreePanel {
-		panelStyle = panelStyle.BorderForeground(lipgloss.Color("blue"))
-	}
-
-	return panelStyle.Render(content)
+	return m.renderPanel(content, width, height, m.panel == FileTreePanel)
 }
 
 func (m Model) renderDiffPanel(width, height int) string {
-	// Enhanced styles with better, softer colors
-	// Added lines - pleasing soft green
-	addedStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("142")). // Soft green for content
-		Bold(false)
-
-	addedPrefixStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("86")). // Brighter green for + prefix
-		Bold(true)
-
-	// Removed lines - pleasing soft red
-	removedStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("203")). // Soft red for content
-		Bold(false)
-
-	removedPrefixStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("196")). // Brighter red for - prefix
-		Bold(true)
-
-	// Context lines - light gray for readability
-	contextStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("245")) // Light gray, easy on eyes
-
-	// Hunk separator - subtle visual divider
-	hunkStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("244")). // Subtle gray
-		Bold(false)
-
-	// File header style
-	fileHeaderStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("75")). // Blue
-		Bold(true)
-
 	// Get selected file(s).
 	filesToRender := m.getSelectedDiffFiles()
 
@@ -284,10 +232,7 @@ func (m Model) renderDiffPanel(width, height int) string {
 
 	if m.diffMode == BranchCompare {
 		// Add branch compare info header.
-		commitHeaderStyle := lipgloss.NewStyle().
-			Foreground(lipgloss.Color("86")).
-			Bold(true)
-		allLines = append(allLines, commitHeaderStyle.Render("Branch Compare: current working tree vs default branch"))
+		allLines = append(allLines, diffCommitHeaderStyle.Render("Branch Compare: current working tree vs default branch"))
 		allLines = append(allLines, "")
 	}
 
@@ -297,30 +242,24 @@ func (m Model) renderDiffPanel(width, height int) string {
 		if m.diffMode == BranchCompare {
 			msg = "Select a file to view unified changes"
 		}
-		allLines = append(allLines, lipgloss.NewStyle().
-			Foreground(lipgloss.Color("243")).
-			Italic(true).
-			Render(msg))
+		allLines = append(allLines, panelInfoStyle.Render(msg))
 	} else {
 		for fileIdx, selectedFile := range filesToRender {
 			if fileIdx > 0 {
 				allLines = append(allLines, "")
-				allLines = append(allLines, hunkStyle.Render("════════════════════════════════════"))
+				allLines = append(allLines, diffHunkStyle.Render("════════════════════════════════════"))
 			}
 
 			// Add file path header
-			allLines = append(allLines, fileHeaderStyle.Render("📄 "+selectedFile.Path))
+			allLines = append(allLines, diffFileHeaderStyle.Render("📄 "+selectedFile.Path))
 
 			if len(selectedFile.Hunks) == 0 {
 				// File has no hunks (binary file or no changes)
-				allLines = append(allLines, lipgloss.NewStyle().
-					Foreground(lipgloss.Color("243")).
-					Italic(true).
-					Render("No diff content available (binary file or no changes)"))
+				allLines = append(allLines, panelInfoStyle.Render("No diff content available (binary file or no changes)"))
 			} else {
 				for _, hunk := range selectedFile.Hunks {
 					// Add hunk header
-					allLines = append(allLines, hunkStyle.Render("─"))
+					allLines = append(allLines, diffHunkStyle.Render("─"))
 
 					for _, diffLine := range hunk.Lines {
 						var prefix string
@@ -330,16 +269,16 @@ func (m Model) renderDiffPanel(width, height int) string {
 						switch diffLine.Type {
 						case LineAdded:
 							prefix = "+"
-							prefixStyle = addedPrefixStyle
-							contentStyle = addedStyle
+							prefixStyle = diffAddedPrefixStyle
+							contentStyle = diffAddedStyle
 						case LineRemoved:
 							prefix = "-"
-							prefixStyle = removedPrefixStyle
-							contentStyle = removedStyle
+							prefixStyle = diffRemovedPrefixStyle
+							contentStyle = diffRemovedStyle
 						default:
 							prefix = " "
-							prefixStyle = contextStyle
-							contentStyle = contextStyle
+							prefixStyle = diffContextStyle
+							contentStyle = diffContextStyle
 						}
 
 						// Render prefix and content separately for better styling
@@ -380,60 +319,37 @@ func (m Model) renderDiffPanel(width, height int) string {
 	content := strings.Join(lines, "\n")
 
 	// Apply panel styling with border
-	panelStyle := lipgloss.NewStyle().
-		Width(width).
-		Height(height).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("237")).
-		MaxWidth(width).
-		MaxHeight(height)
-
-	if m.panel == DiffPanel {
-		panelStyle = panelStyle.BorderForeground(lipgloss.Color("blue"))
-	}
-
-	return panelStyle.Render(content)
+	return m.renderPanel(content, width, height, m.panel == DiffPanel)
 }
 
 func (m Model) renderFooter() string {
-	// Styles
-	footerStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("243"))
-
-	keyStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("blue")).
-		Bold(true)
-
-	scrollStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("yellow"))
-
 	// Build contextual help text to reduce footer overload.
 	help := []string{}
 
 	if m.panel == FileTreePanel {
-		help = append(help, keyStyle.Render("[↑↓/j/k]")+" Navigate")
-		help = append(help, keyStyle.Render("[PgUp/PgDn]")+" Page")
-		help = append(help, keyStyle.Render("[Enter]")+" Select/Expand")
+		help = append(help, footerKeyStyle.Render("[↑↓/j/k]")+" Navigate")
+		help = append(help, footerKeyStyle.Render("[PgUp/PgDn]")+" Page")
+		help = append(help, footerKeyStyle.Render("[Enter]")+" Select/Expand")
 	} else {
-		help = append(help, keyStyle.Render("[↑↓]")+" Scroll")
-		help = append(help, keyStyle.Render("[PgUp/PgDn]")+" Page")
+		help = append(help, footerKeyStyle.Render("[↑↓]")+" Scroll")
+		help = append(help, footerKeyStyle.Render("[PgUp/PgDn]")+" Page")
 		if m.diffViewMode == DiffOnly {
-			help = append(help, keyStyle.Render("[j/k]")+" Hunk Jump")
+			help = append(help, footerKeyStyle.Render("[j/k]")+" Hunk Jump")
 		} else {
-			help = append(help, keyStyle.Render("[j/k]")+" Scroll")
+			help = append(help, footerKeyStyle.Render("[j/k]")+" Scroll")
 		}
-		help = append(help, keyStyle.Render("[gg/G]")+" Top/Bottom")
+		help = append(help, footerKeyStyle.Render("[gg/G]")+" Top/Bottom")
 	}
 
 	if m.diffViewMode == DiffOnly {
-		help = append(help, keyStyle.Render("[o/O]")+" Expand/Reset")
-		help = append(help, keyStyle.Render("[Tab]")+" Switch Panel")
+		help = append(help, footerKeyStyle.Render("[o/O]")+" Expand/Reset")
+		help = append(help, footerKeyStyle.Render("[Tab]")+" Switch Panel")
 	}
 
-	help = append(help, keyStyle.Render("[s]")+" Mode")
-	help = append(help, keyStyle.Render("[f]")+" Diff/Whole File")
-	help = append(help, keyStyle.Render("[?]")+" Help")
-	help = append(help, keyStyle.Render("[q]")+" Quit")
+	help = append(help, footerKeyStyle.Render("[s]")+" Mode")
+	help = append(help, footerKeyStyle.Render("[f]")+" Diff/Whole File")
+	help = append(help, footerKeyStyle.Render("[?]")+" Help")
+	help = append(help, footerKeyStyle.Render("[q]")+" Quit")
 
 	// Add scroll indicator for diff panel
 	if m.panel == DiffPanel {
@@ -453,18 +369,15 @@ func (m Model) renderFooter() string {
 				}
 				scrollPercent = (scrollPos * 100) / maxScroll
 			}
-			help = append(help, scrollStyle.Render(fmt.Sprintf("Scroll: %d%%", scrollPercent)))
+			help = append(help, footerScrollStyle.Render(fmt.Sprintf("Scroll: %d%%", scrollPercent)))
 		}
 	}
 
 	if m.err != nil {
-		errorStyle := lipgloss.NewStyle().
-			Foreground(lipgloss.Color("196")).
-			Bold(true)
 		help = append(help, errorStyle.Render("Error: "+m.err.Error()))
 	}
 
-	return footerStyle.Render(strings.Join(help, " • "))
+	return footerBaseStyle.Render(strings.Join(help, " • "))
 }
 
 func min(a, b int) int {
@@ -481,9 +394,7 @@ func (m Model) renderHelpModal() string {
 
 // renderCommits renders the list of commits for branch comparison
 func (m Model) renderCommits(width, height int) string {
-	selectedStyle := lipgloss.NewStyle().
-		Background(lipgloss.Color("235")).
-		Width(width - 2)
+	selectedStyle := fileTreeSelectedLineStyle.Width(max(0, width-2))
 
 	// Calculate internal content height
 	internalHeight := height - 2
@@ -493,12 +404,8 @@ func (m Model) renderCommits(width, height int) string {
 
 	// If no commits ahead, show changes summary
 	if len(m.commits) == 0 {
-		infoStyle := lipgloss.NewStyle().
-			Foreground(lipgloss.Color("243")).
-			Italic(true)
-
 		var lines []string
-		lines = append(lines, infoStyle.Render("No commits ahead of main"))
+		lines = append(lines, panelInfoStyle.Render("No commits ahead of main"))
 
 		// Show staged/unstaged file count if available
 		if len(m.diffFiles) > 0 {
@@ -515,24 +422,12 @@ func (m Model) renderCommits(width, height int) string {
 			}
 
 			lines = append(lines, "")
-			lines = append(lines, infoStyle.Render(fmt.Sprintf("Changes: %d files", len(m.diffFiles))))
+			lines = append(lines, panelInfoStyle.Render(fmt.Sprintf("Changes: %d files", len(m.diffFiles))))
 		}
 
 		content := strings.Join(lines, "\n")
 
-		panelStyle := lipgloss.NewStyle().
-			Width(width).
-			Height(height).
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("237")).
-			MaxWidth(width).
-			MaxHeight(height)
-
-		if m.panel == FileTreePanel {
-			panelStyle = panelStyle.BorderForeground(lipgloss.Color("blue"))
-		}
-
-		return panelStyle.Render(content)
+		return m.renderPanel(content, width, height, m.panel == FileTreePanel)
 	}
 
 	// Get visible commits
@@ -553,29 +448,16 @@ func (m Model) renderCommits(width, height int) string {
 		isSelected := globalIndex == m.selectedIndex
 
 		// Build commit line
-		commitStyle := lipgloss.NewStyle().
-			Foreground(lipgloss.Color("86")). // Green for hash
-			Bold(true)
-
-		authorStyle := lipgloss.NewStyle().
-			Foreground(lipgloss.Color("147")) // Light blue for author
-
-		dateStyle := lipgloss.NewStyle().
-			Foreground(lipgloss.Color("245")) // Gray for date
-
-		messageStyle := lipgloss.NewStyle().
-			Foreground(lipgloss.Color("223")) // Light yellow for message
-
-		line := commitStyle.Render(commit.ShortHash) + " " +
-			authorStyle.Render(commit.Author) + " " +
-			dateStyle.Render(commit.Date) + "\n" +
-			"    " + messageStyle.Render(commit.Message)
+		line := commitHashStyle.Render(commit.ShortHash) + " " +
+			commitAuthorStyle.Render(commit.Author) + " " +
+			commitDateStyle.Render(commit.Date) + "\n" +
+			"    " + commitMessageStyle.Render(commit.Message)
 
 		if isSelected && m.panel == FileTreePanel {
 			line = selectedStyle.Render(commit.ShortHash + " " + commit.Author + " " + commit.Date)
 			lines = append(lines, line)
 			// Add message on next line
-			lines = append(lines, "    "+messageStyle.Render(commit.Message))
+			lines = append(lines, "    "+commitMessageStyle.Render(commit.Message))
 		} else {
 			lines = append(lines, line)
 		}
@@ -585,17 +467,19 @@ func (m Model) renderCommits(width, height int) string {
 	content := strings.Join(lines, "\n")
 
 	// Apply panel styling with border
-	panelStyle := lipgloss.NewStyle().
-		Width(width).
-		Height(height).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("237")).
-		MaxWidth(width).
-		MaxHeight(height)
+	return m.renderPanel(content, width, height, m.panel == FileTreePanel)
+}
 
-	if m.panel == FileTreePanel {
-		panelStyle = panelStyle.BorderForeground(lipgloss.Color("blue"))
+func (m Model) renderPanel(content string, width, height int, active bool) string {
+	style := panelBaseStyle
+	if active {
+		style = panelActiveStyle
 	}
 
-	return panelStyle.Render(content)
+	return style.
+		Width(width).
+		Height(height).
+		MaxWidth(width).
+		MaxHeight(height).
+		Render(content)
 }
