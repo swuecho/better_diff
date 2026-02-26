@@ -717,7 +717,7 @@ func buildTreeNodesWithSummary(dir *dirNode, depth int) ([]TreeNode, int, int, C
 		}
 
 		nodes = append(nodes, TreeNode{
-			name:         getFileName(file.Path),
+			name:         fileNameFromPath(file.Path),
 			path:         file.Path,
 			isDir:        false,
 			changeType:   file.ChangeType,

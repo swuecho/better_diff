@@ -15,7 +15,7 @@ import (
 
 // FSChangeMsg is sent when file system changes are detected
 type FSChangeMsg struct {
-	time time.Time
+	changedAt time.Time
 }
 
 // Watcher handles file system watching
@@ -93,7 +93,7 @@ func (w *Watcher) WaitForChange() tea.Cmd {
 				}
 				w.trackCreatedDirectory(event)
 				time.Sleep(watcherDebounceDelay)
-				return FSChangeMsg{time: time.Now()}
+				return FSChangeMsg{changedAt: time.Now()}
 
 			case err, ok := <-w.watcher.Errors:
 				if !ok {

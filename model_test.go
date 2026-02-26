@@ -561,7 +561,7 @@ func TestFSChangeMsg(t *testing.T) {
 	model := setupModel(t)
 	model.lastFileHash = "test"
 
-	msg := FSChangeMsg{time: time.Now()}
+	msg := FSChangeMsg{changedAt: time.Now()}
 	newModel, cmd := model.Update(msg)
 
 	if cmd == nil {

@@ -2,8 +2,6 @@ package main
 
 import (
 	"strings"
-
-	"github.com/sergi/go-diff/diffmatchpatch"
 )
 
 // ChangeType represents the type of change
@@ -105,170 +103,173 @@ func computeHunks(oldLines, newLines []string) ([]Hunk, error) {
 
 // computeHunksWithContext computes diff hunks using Myers diff algorithm with a custom context size.
 func computeHunksWithContext(oldLines, newLines []string, contextLines int) ([]Hunk, error) {
-	dmp := diffmatchpatch.New()
+	return computeHunksWithDifflib(oldLines, newLines, contextLines)
+}
 
-	if contextLines < 0 {
-		contextLines = 0
+type lineDiff struct {
+	Type  diffOp
+	Lines []string
+}
+
+type diffOp int
+
+const (
+	diffEqual diffOp = iota
+	diffDelete
+	diffInsert
+)
+
+func appendMergedLineDiff(lineDiffs []lineDiff, diffType diffOp, lines []string) []lineDiff {
+	if len(lineDiffs) > 0 && lineDiffs[len(lineDiffs)-1].Type == diffType {
+		lineDiffs[len(lineDiffs)-1].Lines = append(lineDiffs[len(lineDiffs)-1].Lines, lines...)
+		return lineDiffs
 	}
+	return append(lineDiffs, lineDiff{
+		Type:  diffType,
+		Lines: lines,
+	})
+}
 
-	// Join lines with a trailing newline sentinel so pure append/prepend edits
-	// are not misclassified as replace operations on the final line.
-	oldText := joinLinesForDiff(oldLines)
-	newText := joinLinesForDiff(newLines)
+type hunkBuilder struct {
+	contextLines   int
+	hunks          []Hunk
+	currentHunk    *Hunk
+	pendingContext []string
+	oldLineNum     int
+	newLineNum     int
+}
 
-	// Convert to line-based character encoding
-	// This encodes each unique line as a single character for efficient diffing
-	oldChars, newChars, lineArray := dmp.DiffLinesToChars(oldText, newText)
-
-	// Compute the diff on the character-encoded text
-	charDiffs := dmp.DiffMain(oldChars, newChars, false)
-
-	// Convert character diffs to line diffs manually
-	// We need to split the character-encoded text by characters and map each to a line
-	// Then merge adjacent diffs of the same type
-	type lineDiff struct {
-		Type  diffmatchpatch.Operation
-		Lines []string
+func buildHunks(lineDiffs []lineDiff, contextLines int) []Hunk {
+	builder := hunkBuilder{
+		contextLines:   contextLines,
+		hunks:          make([]Hunk, 0, len(lineDiffs)),
+		pendingContext: []string{},
+		oldLineNum:     1,
+		newLineNum:     1,
 	}
-
-	var lineDiffs []lineDiff
-
-	for _, charDiff := range charDiffs {
-		// Each character in charDiff.Text represents one line
-		runes := []rune(charDiff.Text)
-		var lines []string
-		for _, r := range runes {
-			// Convert rune to int for array indexing
-			idx := int(r)
-			if idx < len(lineArray) {
-				// Get the line and strip trailing newline if present
-				line := lineArray[idx]
-				line = strings.TrimSuffix(line, "\n")
-				lines = append(lines, line)
-			}
-		}
-
-		// Merge with previous diff if same type
-		if len(lineDiffs) > 0 && lineDiffs[len(lineDiffs)-1].Type == charDiff.Type {
-			lineDiffs[len(lineDiffs)-1].Lines = append(lineDiffs[len(lineDiffs)-1].Lines, lines...)
-		} else {
-			lineDiffs = append(lineDiffs, lineDiff{
-				Type:  charDiff.Type,
-				Lines: lines,
-			})
-		}
-	}
-
-	// Convert line diffs to hunks
-	var hunks []Hunk
-	var currentHunk *Hunk
-	pendingEqual := []string{}
-
-	oldLineNum := 1
-	newLineNum := 1
 
 	for _, diff := range lineDiffs {
-		if len(diff.Lines) == 0 {
-			continue
-		}
-
-		switch diff.Type {
-		case diffmatchpatch.DiffEqual:
-			if currentHunk != nil {
-				// Add context lines
-				for _, line := range diff.Lines {
-					currentHunk.Lines = append(currentHunk.Lines, DiffLine{
-						Type:    LineContext,
-						Content: line,
-					})
-					oldLineNum++
-					newLineNum++
-				}
-
-				// Check if we should close the hunk and split around large unchanged regions.
-				trailingContext := countTrailingContextLines(currentHunk.Lines)
-
-				// Only close if we have actual changes and enough context
-				if trailingContext >= contextLines {
-					if hunkHasChanges(currentHunk.Lines) {
-						trimCount := 0
-						// Trim to keep only contextLines lines of trailing context
-						if trailingContext > contextLines {
-							trimCount = trailingContext - contextLines
-							currentHunk.Lines = currentHunk.Lines[:len(currentHunk.Lines)-trimCount]
-						}
-						currentHunk.OldCount = oldLineNum - currentHunk.OldStart - trimCount
-						currentHunk.NewCount = newLineNum - currentHunk.NewStart - trimCount
-
-						hunks = append(hunks, *currentHunk)
-						currentHunk = nil
-
-						// Keep tail context as potential leading context for the next hunk.
-						pendingEqual = tailContextLines(diff.Lines, contextLines)
-					}
-				}
-			} else {
-				oldLineNum += len(diff.Lines)
-				newLineNum += len(diff.Lines)
-				if contextLines > 0 {
-					pendingEqual = append(pendingEqual, diff.Lines...)
-					if len(pendingEqual) > contextLines {
-						pendingEqual = tailContextLines(pendingEqual, contextLines)
-					}
-				} else {
-					pendingEqual = pendingEqual[:0]
-				}
-			}
-
-		case diffmatchpatch.DiffDelete:
-			if currentHunk == nil {
-				currentHunk = newHunkWithLeadingContext(pendingEqual, contextLines, oldLineNum, newLineNum, len(diff.Lines))
-				pendingEqual = pendingEqual[:0]
-			}
-
-			for _, line := range diff.Lines {
-				currentHunk.Lines = append(currentHunk.Lines, DiffLine{
-					Type:    LineRemoved,
-					Content: line,
-				})
-				oldLineNum++
-			}
-
-		case diffmatchpatch.DiffInsert:
-			if currentHunk == nil {
-				currentHunk = newHunkWithLeadingContext(pendingEqual, contextLines, oldLineNum, newLineNum, len(diff.Lines))
-				pendingEqual = pendingEqual[:0]
-			}
-
-			for _, line := range diff.Lines {
-				currentHunk.Lines = append(currentHunk.Lines, DiffLine{
-					Type:    LineAdded,
-					Content: line,
-				})
-				newLineNum++
-			}
-		}
+		builder.process(diff)
 	}
 
-	// Close the last hunk
-	if currentHunk != nil {
-		currentHunk.OldCount = oldLineNum - currentHunk.OldStart
-		currentHunk.NewCount = newLineNum - currentHunk.NewStart
+	builder.finalize()
+	return builder.hunks
+}
 
-		// Trim trailing context
-		trailingContext := countTrailingContextLines(currentHunk.Lines)
+func (b *hunkBuilder) process(diff lineDiff) {
+	switch diff.Type {
+	case diffEqual:
+		b.processEqualLines(diff.Lines)
+	case diffDelete:
+		b.processRemovedLines(diff.Lines)
+	case diffInsert:
+		b.processAddedLines(diff.Lines)
+	}
+}
 
-		if trailingContext > contextLines {
-			trimCount := trailingContext - contextLines
-			currentHunk.Lines = currentHunk.Lines[:len(currentHunk.Lines)-trimCount]
-			currentHunk.OldCount -= trimCount
-			currentHunk.NewCount -= trimCount
-		}
-
-		hunks = append(hunks, *currentHunk)
+func (b *hunkBuilder) processEqualLines(lines []string) {
+	if b.currentHunk == nil {
+		b.oldLineNum += len(lines)
+		b.newLineNum += len(lines)
+		b.pendingContext = appendPendingContext(b.pendingContext, lines, b.contextLines)
+		return
 	}
 
-	return hunks, nil
+	for _, line := range lines {
+		b.currentHunk.Lines = append(b.currentHunk.Lines, DiffLine{
+			Type:    LineContext,
+			Content: line,
+		})
+		b.oldLineNum++
+		b.newLineNum++
+	}
+
+	b.maybeCloseCurrentHunk(lines)
+}
+
+func (b *hunkBuilder) processRemovedLines(lines []string) {
+	b.ensureCurrentHunk(len(lines))
+	for _, line := range lines {
+		b.currentHunk.Lines = append(b.currentHunk.Lines, DiffLine{
+			Type:    LineRemoved,
+			Content: line,
+		})
+		b.oldLineNum++
+	}
+}
+
+func (b *hunkBuilder) processAddedLines(lines []string) {
+	b.ensureCurrentHunk(len(lines))
+	for _, line := range lines {
+		b.currentHunk.Lines = append(b.currentHunk.Lines, DiffLine{
+			Type:    LineAdded,
+			Content: line,
+		})
+		b.newLineNum++
+	}
+}
+
+func (b *hunkBuilder) ensureCurrentHunk(diffLineCount int) {
+	if b.currentHunk != nil {
+		return
+	}
+	b.currentHunk = newHunkWithLeadingContext(
+		b.pendingContext,
+		b.contextLines,
+		b.oldLineNum,
+		b.newLineNum,
+		diffLineCount,
+	)
+	b.pendingContext = b.pendingContext[:0]
+}
+
+func (b *hunkBuilder) maybeCloseCurrentHunk(equalLines []string) {
+	trailingContext := countTrailingContextLines(b.currentHunk.Lines)
+	if trailingContext < b.contextLines || !hunkHasChanges(b.currentHunk.Lines) {
+		return
+	}
+
+	trimCount := max(0, trailingContext-b.contextLines)
+	if trimCount > 0 {
+		b.currentHunk.Lines = b.currentHunk.Lines[:len(b.currentHunk.Lines)-trimCount]
+	}
+
+	b.currentHunk.OldCount = b.oldLineNum - b.currentHunk.OldStart - trimCount
+	b.currentHunk.NewCount = b.newLineNum - b.currentHunk.NewStart - trimCount
+	b.hunks = append(b.hunks, *b.currentHunk)
+	b.currentHunk = nil
+	b.pendingContext = tailContextLines(equalLines, b.contextLines)
+}
+
+func (b *hunkBuilder) finalize() {
+	if b.currentHunk == nil {
+		return
+	}
+
+	b.currentHunk.OldCount = b.oldLineNum - b.currentHunk.OldStart
+	b.currentHunk.NewCount = b.newLineNum - b.currentHunk.NewStart
+
+	trailingContext := countTrailingContextLines(b.currentHunk.Lines)
+	if trailingContext > b.contextLines {
+		trimCount := trailingContext - b.contextLines
+		b.currentHunk.Lines = b.currentHunk.Lines[:len(b.currentHunk.Lines)-trimCount]
+		b.currentHunk.OldCount -= trimCount
+		b.currentHunk.NewCount -= trimCount
+	}
+
+	b.hunks = append(b.hunks, *b.currentHunk)
+}
+
+func appendPendingContext(pendingContext, lines []string, contextLines int) []string {
+	if contextLines <= 0 {
+		return pendingContext[:0]
+	}
+
+	pendingContext = append(pendingContext, lines...)
+	if len(pendingContext) <= contextLines {
+		return pendingContext
+	}
+	return tailContextLines(pendingContext, contextLines)
 }
 
 func trimLeadingContext(h Hunk) Hunk {

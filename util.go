@@ -11,8 +11,8 @@ func readAll(r io.Reader) ([]byte, error) {
 	return io.ReadAll(r)
 }
 
-func splitPath(path string) []string {
-	rawParts := strings.Split(path, "/")
+func splitPath(inputPath string) []string {
+	rawParts := strings.Split(inputPath, "/")
 	parts := make([]string, 0, len(rawParts))
 	for _, part := range rawParts {
 		if part != "" {
@@ -26,7 +26,7 @@ func joinPath(parts []string) string {
 	return strings.Join(parts, "/")
 }
 
-func getFileName(path string) string {
+func fileNameFromPath(path string) string {
 	name := pathpkg.Base(path)
 	if name != "." && name != "/" && name != "" {
 		return name
