@@ -3,7 +3,9 @@ package main
 import (
 	"fmt"
 	"hash/fnv"
+	pathpkg "path"
 	"sort"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -14,6 +16,11 @@ type dirNode struct {
 	name    string
 	files   []FileDiff
 	subdirs map[string]*dirNode
+}
+
+type diffLayout struct {
+	totalLines int
+	hunkStarts []int
 }
 
 // Update implements tea.Model
@@ -145,27 +152,9 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) toggleDiffMode() tea.Cmd {
-	switch m.diffMode {
-	case Unstaged:
-		m.diffMode = Staged
-	case Staged:
-		m.diffMode = BranchCompare
-	default:
-		m.diffMode = Unstaged
-	}
-
-	m.selectedIndex = 0
-	m.scrollOffset = 0
-	m.diffScroll = 0
-	m.diffFiles = nil
-	m.files = nil
-	m.commits = nil
-	m.selectedCommit = nil
-
-	if m.diffMode == BranchCompare {
-		return tea.Batch(m.LoadCommitsAhead(), m.LoadBranchCompareDiff(nil))
-	}
-	return tea.Batch(m.LoadFiles(), m.LoadAllDiffs())
+	m.diffMode = nextDiffMode(m.diffMode)
+	m.resetSelectionAndLoadedData()
+	return m.reloadByDiffMode()
 }
 
 func (m *Model) toggleDiffViewMode() tea.Cmd {
@@ -179,10 +168,7 @@ func (m *Model) toggleDiffViewMode() tea.Cmd {
 	m.diffScroll = 0
 	m.diffFiles = nil
 
-	if m.diffMode == BranchCompare {
-		return tea.Batch(m.LoadCommitsAhead(), m.LoadBranchCompareDiff(m.commits))
-	}
-	return m.LoadAllDiffs()
+	return m.reloadDiffsForCurrentMode()
 }
 
 func (m Model) handleAsyncMsg(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -379,10 +365,7 @@ func (m *Model) moveDiffPageDown() {
 }
 
 func (m Model) reloadCurrentDiffs() tea.Cmd {
-	if m.diffMode == BranchCompare {
-		return tea.Batch(m.LoadCommitsAhead(), m.LoadBranchCompareDiff(m.commits))
-	}
-	return m.LoadAllDiffs()
+	return m.reloadDiffsForCurrentMode()
 }
 
 // moveDiffToTop scrolls the diff view to the top.
@@ -416,36 +399,7 @@ func max(a, b int) int {
 // getDiffLineCount returns the total number of lines in the current diff
 func (m *Model) getDiffLineCount() int {
 	filesToRender := m.getSelectedDiffFiles()
-	if len(filesToRender) == 0 {
-		if m.diffMode == BranchCompare {
-			return 3 // branch header + blank + message
-		}
-		return 1 // message
-	}
-
-	lineCount := 0
-	if m.diffMode == BranchCompare {
-		lineCount += 2 // branch header + blank
-	}
-
-	for fileIdx, selectedFile := range filesToRender {
-		if fileIdx > 0 {
-			lineCount += 2 // blank + separator
-		}
-
-		lineCount++ // file header
-		if len(selectedFile.Hunks) == 0 {
-			lineCount++ // empty-file message
-			continue
-		}
-
-		for _, hunk := range selectedFile.Hunks {
-			lineCount++ // hunk separator
-			lineCount += len(hunk.Lines)
-		}
-	}
-
-	return lineCount
+	return m.computeDiffLayout(filesToRender).totalLines
 }
 
 // selectItem handles selection of current item
@@ -460,18 +414,17 @@ func (m *Model) selectItem() tea.Cmd {
 		// Toggle directory expansion
 		m.toggleDirectory(node.path)
 		return nil
-	} else {
-		// In branch compare mode, file diffs are already loaded.
-		if m.diffMode == BranchCompare {
-			m.diffScroll = 0
-			return nil
-		}
-
-		// Reset diff scroll when selecting a new file
-		m.diffScroll = 0
-		// Load diff for the file
-		return m.LoadDiff(node.path)
 	}
+
+	// In branch compare mode, file diffs are already loaded.
+	if m.diffMode == BranchCompare {
+		m.diffScroll = 0
+		return nil
+	}
+
+	// Reset diff scroll when selecting a new file.
+	m.diffScroll = 0
+	return m.LoadDiff(node.path)
 }
 
 func (m *Model) jumpToNextHunk() {
@@ -508,8 +461,18 @@ func (m *Model) jumpToPrevHunk() {
 
 func (m Model) getCurrentHunkStartLines() []int {
 	filesToRender := m.getSelectedDiffFiles()
+	return m.computeDiffLayout(filesToRender).hunkStarts
+}
+
+func (m Model) computeDiffLayout(filesToRender []*FileDiff) diffLayout {
+	layout := diffLayout{}
 	if len(filesToRender) == 0 {
-		return nil
+		if m.diffMode == BranchCompare {
+			layout.totalLines = 3 // branch header + blank + message
+		} else {
+			layout.totalLines = 1 // message
+		}
+		return layout
 	}
 
 	lineNum := 0
@@ -517,7 +480,6 @@ func (m Model) getCurrentHunkStartLines() []int {
 		lineNum += 2 // branch header + blank
 	}
 
-	var starts []int
 	for fileIdx, selectedFile := range filesToRender {
 		if fileIdx > 0 {
 			lineNum += 2 // blank + separator
@@ -530,13 +492,14 @@ func (m Model) getCurrentHunkStartLines() []int {
 		}
 
 		for _, hunk := range selectedFile.Hunks {
-			starts = append(starts, lineNum)
+			layout.hunkStarts = append(layout.hunkStarts, lineNum)
 			lineNum++ // hunk separator line
 			lineNum += len(hunk.Lines)
 		}
 	}
 
-	return starts
+	layout.totalLines = lineNum
+	return layout
 }
 
 func (m Model) getSelectedDiffFiles() []*FileDiff {
@@ -550,58 +513,52 @@ func (m Model) getSelectedDiffFiles() []*FileDiff {
 		return nil
 	}
 
-	var filesToRender []*FileDiff
-	if m.diffMode == BranchCompare {
-		for i := range m.diffFiles {
-			if m.diffFiles[i].Path == node.path {
-				filesToRender = append(filesToRender, &m.diffFiles[i])
-			}
-		}
-		return filesToRender
-	}
-
+	matching := make([]*FileDiff, 0, 1)
 	for i := range m.diffFiles {
-		if m.diffFiles[i].Path == node.path {
-			filesToRender = append(filesToRender, &m.diffFiles[i])
+		if m.diffFiles[i].Path != node.path {
+			continue
+		}
+		matching = append(matching, &m.diffFiles[i])
+		if m.diffMode != BranchCompare {
 			break
 		}
 	}
-	return filesToRender
+	return matching
 }
 
 // toggleDirectory toggles directory expansion
 func (m *Model) toggleDirectory(path string) {
-	var toggle func(nodes []TreeNode) bool
-	toggle = func(nodes []TreeNode) bool {
-		for i := range nodes {
-			if nodes[i].path == path && nodes[i].isDir {
-				nodes[i].isExpanded = !nodes[i].isExpanded
-				return true
-			}
-			if nodes[i].isDir && toggle(nodes[i].children) {
-				return true
-			}
-		}
-		return false
-	}
-	toggle(m.fileTree)
+	toggleDirectoryInNodes(m.fileTree, path)
 }
 
 // flattenTree flattens the tree for navigation
 func (m *Model) flattenTree() []TreeNode {
-	return flattenTree(m.fileTree, 0)
+	result := make([]TreeNode, 0, len(m.fileTree))
+	appendFlattenedTree(&result, m.fileTree, 0)
+	return result
 }
 
-func flattenTree(nodes []TreeNode, depth int) []TreeNode {
-	var result []TreeNode
-	for _, node := range nodes {
-		node.depth = depth
-		result = append(result, node)
-		if node.isDir && node.isExpanded {
-			result = append(result, flattenTree(node.children, depth+1)...)
+func toggleDirectoryInNodes(nodes []TreeNode, path string) bool {
+	for i := range nodes {
+		if nodes[i].path == path && nodes[i].isDir {
+			nodes[i].isExpanded = !nodes[i].isExpanded
+			return true
+		}
+		if nodes[i].isDir && toggleDirectoryInNodes(nodes[i].children, path) {
+			return true
 		}
 	}
-	return result
+	return false
+}
+
+func appendFlattenedTree(dst *[]TreeNode, nodes []TreeNode, depth int) {
+	for _, node := range nodes {
+		node.depth = depth
+		*dst = append(*dst, node)
+		if node.isDir && node.isExpanded {
+			appendFlattenedTree(dst, node.children, depth+1)
+		}
+	}
 }
 
 // buildFileTree builds the file tree from the list of changed files
@@ -646,7 +603,16 @@ func (m *Model) buildFileTree() {
 }
 
 func buildTreeNodes(dir *dirNode, depth int) []TreeNode {
+	nodes, _, _, _ := buildTreeNodesWithSummary(dir, depth)
+	return nodes
+}
+
+func buildTreeNodesWithSummary(dir *dirNode, depth int) ([]TreeNode, int, int, ChangeType) {
 	var nodes []TreeNode
+	totalAdded := 0
+	totalRemoved := 0
+	hasAdded := false
+	hasDeleted := false
 
 	// Add subdirectories first
 	subdirNames := make([]string, 0, len(dir.subdirs))
@@ -656,17 +622,24 @@ func buildTreeNodes(dir *dirNode, depth int) []TreeNode {
 	sort.Strings(subdirNames)
 	for _, name := range subdirNames {
 		subdir := dir.subdirs[name]
-		childNodes := buildTreeNodes(subdir, depth+1)
-		totalAdded, totalRemoved := getDirStats(subdir)
+		childNodes, childAdded, childRemoved, childType := buildTreeNodesWithSummary(subdir, depth+1)
+		totalAdded += childAdded
+		totalRemoved += childRemoved
+		if childType == Added {
+			hasAdded = true
+		} else if childType == Deleted {
+			hasDeleted = true
+		}
+
 		nodes = append(nodes, TreeNode{
 			name:         subdir.name,
 			path:         subdir.path,
 			isDir:        true,
 			isExpanded:   true,
 			children:     childNodes,
-			changeType:   getDirChangeType(subdir),
-			linesAdded:   totalAdded,
-			linesRemoved: totalRemoved,
+			changeType:   childType,
+			linesAdded:   childAdded,
+			linesRemoved: childRemoved,
 		})
 	}
 
@@ -675,6 +648,14 @@ func buildTreeNodes(dir *dirNode, depth int) []TreeNode {
 		return dir.files[i].Path < dir.files[j].Path
 	})
 	for _, file := range dir.files {
+		totalAdded += file.LinesAdded
+		totalRemoved += file.LinesRemoved
+		if file.ChangeType == Added {
+			hasAdded = true
+		} else if file.ChangeType == Deleted {
+			hasDeleted = true
+		}
+
 		nodes = append(nodes, TreeNode{
 			name:         getFileName(file.Path),
 			path:         file.Path,
@@ -685,89 +666,72 @@ func buildTreeNodes(dir *dirNode, depth int) []TreeNode {
 		})
 	}
 
-	return nodes
-}
-
-func getDirChangeType(dir *dirNode) ChangeType {
-	// Determine directory change type based on contents
-	hasAdded := false
-	hasDeleted := false
-
-	for _, file := range dir.files {
-		if file.ChangeType == Added {
-			hasAdded = true
-		} else if file.ChangeType == Deleted {
-			hasDeleted = true
-		}
-	}
-
-	for _, subdir := range dir.subdirs {
-		ct := getDirChangeType(subdir)
-		if ct == Added {
-			hasAdded = true
-		} else if ct == Deleted {
-			hasDeleted = true
-		}
-	}
+	changeType := Modified
 
 	if hasAdded && !hasDeleted {
-		return Added
+		changeType = Added
 	} else if hasDeleted && !hasAdded {
-		return Deleted
+		changeType = Deleted
 	}
-	return Modified
-}
-
-func getDirStats(dir *dirNode) (added int, removed int) {
-	// Calculate total stats for directory
-	for _, file := range dir.files {
-		added += file.LinesAdded
-		removed += file.LinesRemoved
-	}
-	for _, subdir := range dir.subdirs {
-		subAdded, subRemoved := getDirStats(subdir)
-		added += subAdded
-		removed += subRemoved
-	}
-	return added, removed
+	return nodes, totalAdded, totalRemoved, changeType
 }
 
 func splitPath(path string) []string {
-	parts := []string{}
-	current := ""
-	for _, ch := range path {
-		if ch == '/' {
-			if current != "" {
-				parts = append(parts, current)
-				current = ""
-			}
-		} else {
-			current += string(ch)
+	rawParts := strings.Split(path, "/")
+	parts := make([]string, 0, len(rawParts))
+	for _, part := range rawParts {
+		if part != "" {
+			parts = append(parts, part)
 		}
-	}
-	if current != "" {
-		parts = append(parts, current)
 	}
 	return parts
 }
 
 func joinPath(parts []string) string {
-	result := ""
-	for i, part := range parts {
-		if i > 0 {
-			result += "/"
-		}
-		result += part
-	}
-	return result
+	return strings.Join(parts, "/")
 }
 
 func getFileName(path string) string {
-	parts := splitPath(path)
-	if len(parts) > 0 {
-		return parts[len(parts)-1]
+	name := pathpkg.Base(path)
+	if name != "." && name != "/" && name != "" {
+		return name
 	}
 	return path
+}
+
+func nextDiffMode(mode DiffMode) DiffMode {
+	switch mode {
+	case Unstaged:
+		return Staged
+	case Staged:
+		return BranchCompare
+	default:
+		return Unstaged
+	}
+}
+
+func (m *Model) resetSelectionAndLoadedData() {
+	m.selectedIndex = 0
+	m.scrollOffset = 0
+	m.diffScroll = 0
+	m.diffFiles = nil
+	m.files = nil
+	m.commits = nil
+	m.selectedCommit = nil
+}
+
+func (m Model) reloadByDiffMode() tea.Cmd {
+	if m.diffMode == BranchCompare {
+		return tea.Batch(m.LoadCommitsAhead(), m.LoadBranchCompareDiff(nil))
+	}
+	return tea.Batch(m.LoadFiles(), m.LoadAllDiffs())
+}
+
+func (m Model) reloadDiffsForCurrentMode() tea.Cmd {
+	if m.diffMode == BranchCompare {
+		return tea.Batch(m.LoadCommitsAhead(), m.LoadBranchCompareDiff(m.commits))
+	}
+	return m.LoadAllDiffs()
 }
 
 // checkForChanges checks if the git repo has changed and reloads if necessary
@@ -779,71 +743,83 @@ func (m Model) checkForChanges() tea.Cmd {
 		}
 
 		if m.diffMode == BranchCompare {
-			commits, err := m.git.GetCommitsAheadOfMain()
-			if err != nil {
-				if m.logger != nil {
-					m.logger.Error("Failed to check commits in branch compare", err, nil)
-				}
-				return nil
-			}
-
-			unifiedDiffs, err := m.git.GetUnifiedBranchCompareDiff(m.diffViewMode, m.diffContext, m.logger)
-			if err != nil {
-				if m.logger != nil {
-					m.logger.Error("Failed to check unified branch compare diff", err, nil)
-				}
-				return nil
-			}
-
-			currentHash := computeBranchCompareHash(unifiedDiffs, commits)
-
-			if currentHash != m.lastFileHash {
-				if m.logger != nil {
-					m.logger.Info("Repository changes detected", map[string]interface{}{
-						"previous_hash": m.lastFileHash,
-						"new_hash":      currentHash,
-					})
-				}
-				return filesChangedMsg{hash: currentHash}
-			}
-			return nil
+			return m.checkBranchCompareChanges()
 		}
 
-		files, err := m.git.GetChangedFiles(m.diffMode)
-		if err != nil {
-			if m.logger != nil {
-				m.logger.Error("Failed to check file list for changes", err, map[string]interface{}{
-					"mode": m.diffMode,
-				})
-			}
-			return nil
-		}
+		return m.checkWorkingTreeChanges()
+	}
+}
 
-		diffs, err := m.git.GetDiffWithContext(m.diffMode, m.diffViewMode, m.diffContext, m.logger)
-		if err != nil {
-			if m.logger != nil {
-				m.logger.Error("Failed to check diff content for changes", err, map[string]interface{}{
-					"mode": m.diffMode,
-				})
-			}
-			return nil
+func (m Model) checkBranchCompareChanges() tea.Msg {
+	commits, err := m.git.GetCommitsAheadOfMain()
+	if err != nil {
+		if m.logger != nil {
+			m.logger.Error("Failed to check commits in branch compare", err, nil)
 		}
-		currentHash := computeFilesAndDiffHash(files, diffs)
-
-		if currentHash != m.lastFileHash {
-			if m.logger != nil {
-				m.logger.Info("Repository changes detected", map[string]interface{}{
-					"previous_hash": m.lastFileHash,
-					"new_hash":      currentHash,
-					"file_count":    len(files),
-				})
-			}
-			return filesChangedMsg{files: files, hash: currentHash}
-		}
-
-		// No changes
 		return nil
 	}
+
+	unifiedDiffs, err := m.git.GetUnifiedBranchCompareDiff(m.diffViewMode, m.diffContext, m.logger)
+	if err != nil {
+		if m.logger != nil {
+			m.logger.Error("Failed to check unified branch compare diff", err, nil)
+		}
+		return nil
+	}
+
+	currentHash := computeBranchCompareHash(unifiedDiffs, commits)
+	if currentHash == m.lastFileHash {
+		return nil
+	}
+
+	m.logChangeDetected(currentHash, nil)
+	return filesChangedMsg{hash: currentHash}
+}
+
+func (m Model) checkWorkingTreeChanges() tea.Msg {
+	files, err := m.git.GetChangedFiles(m.diffMode)
+	if err != nil {
+		if m.logger != nil {
+			m.logger.Error("Failed to check file list for changes", err, map[string]interface{}{
+				"mode": m.diffMode,
+			})
+		}
+		return nil
+	}
+
+	diffs, err := m.git.GetDiffWithContext(m.diffMode, m.diffViewMode, m.diffContext, m.logger)
+	if err != nil {
+		if m.logger != nil {
+			m.logger.Error("Failed to check diff content for changes", err, map[string]interface{}{
+				"mode": m.diffMode,
+			})
+		}
+		return nil
+	}
+
+	currentHash := computeFilesAndDiffHash(files, diffs)
+	if currentHash == m.lastFileHash {
+		return nil
+	}
+
+	m.logChangeDetected(currentHash, map[string]interface{}{"file_count": len(files)})
+	return filesChangedMsg{files: files, hash: currentHash}
+}
+
+func (m Model) logChangeDetected(newHash string, extra map[string]interface{}) {
+	if m.logger == nil {
+		return
+	}
+
+	fields := map[string]interface{}{
+		"previous_hash": m.lastFileHash,
+		"new_hash":      newHash,
+	}
+	for k, v := range extra {
+		fields[k] = v
+	}
+
+	m.logger.Info("Repository changes detected", fields)
 }
 
 // computeFileHash creates a simple hash string from the list of files

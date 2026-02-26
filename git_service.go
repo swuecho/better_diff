@@ -26,6 +26,42 @@ func isObjectNotFoundError(err error) bool {
 	return strings.Contains(strings.ToLower(err.Error()), "object not found")
 }
 
+func statusCodeForMode(mode DiffMode, fileStatus git.FileStatus) string {
+	if mode == Staged {
+		return string(fileStatus.Staging)
+	}
+	return string(fileStatus.Worktree)
+}
+
+func statusCodeToChangeType(statusCode string) ChangeType {
+	switch statusCode {
+	case "M":
+		return Modified
+	case "A":
+		return Added
+	case "D":
+		return Deleted
+	case "R":
+		return Renamed
+	default:
+		return Modified
+	}
+}
+
+func isRelevantChange(mode DiffMode, status git.Status, path string, fileStatus *git.FileStatus) bool {
+	if mode == Staged {
+		return fileStatus.Staging != git.Unmodified && !status.IsUntracked(path)
+	}
+	return fileStatus.Worktree != git.Unmodified || status.IsUntracked(path)
+}
+
+func changeTypeForMode(mode DiffMode, status git.Status, path string, fileStatus *git.FileStatus) ChangeType {
+	if mode == Unstaged && status.IsUntracked(path) {
+		return Added
+	}
+	return statusCodeToChangeType(statusCodeForMode(mode, *fileStatus))
+}
+
 // GitService encapsulates all git operations
 type GitService struct {
 	repo *git.Repository
@@ -107,56 +143,13 @@ func (gs *GitService) GetChangedFiles(mode DiffMode) ([]FileDiff, error) {
 	var files []FileDiff
 	for _, path := range paths {
 		fileStatus := status[path]
-
-		// Skip untracked files in staged mode (they're not staged yet)
-		if mode == Staged && status.IsUntracked(path) {
+		if !isRelevantChange(mode, status, path, fileStatus) {
 			continue
-		}
-
-		// For unstaged mode, include untracked files
-		// For staged mode, only include files with staged changes
-		var relevantChange bool
-		if mode == Staged {
-			relevantChange = fileStatus.Staging != git.Unmodified
-		} else {
-			// In unstaged mode, include files with worktree changes OR untracked files
-			relevantChange = fileStatus.Worktree != git.Unmodified || status.IsUntracked(path)
-		}
-
-		if !relevantChange {
-			continue
-		}
-
-		var changeType ChangeType
-		var statusCode string
-
-		// Check if file is untracked (only relevant in unstaged mode)
-		if mode == Unstaged && status.IsUntracked(path) {
-			changeType = Added // Untracked files are treated as "to be added"
-		} else {
-			if mode == Staged {
-				statusCode = string(fileStatus.Staging)
-			} else {
-				statusCode = string(fileStatus.Worktree)
-			}
-
-			switch statusCode {
-			case "M":
-				changeType = Modified
-			case "A":
-				changeType = Added
-			case "D":
-				changeType = Deleted
-			case "R":
-				changeType = Renamed
-			default:
-				changeType = Modified
-			}
 		}
 
 		files = append(files, FileDiff{
 			Path:         path,
-			ChangeType:   changeType,
+			ChangeType:   changeTypeForMode(mode, status, path, fileStatus),
 			Hunks:        []Hunk{},
 			LinesAdded:   0,
 			LinesRemoved: 0,
@@ -233,23 +226,7 @@ func (gs *GitService) GetDiffWithContext(mode DiffMode, viewMode DiffViewMode, c
 
 	for _, path := range paths {
 		fileStatus := status[path]
-
-		// Skip untracked files in staged mode (they're not staged yet)
-		if mode == Staged && status.IsUntracked(path) {
-			continue
-		}
-
-		// For unstaged mode, include untracked files
-		// For staged mode, only include files with staged changes
-		var relevantChange bool
-		if mode == Staged {
-			relevantChange = fileStatus.Staging != git.Unmodified
-		} else {
-			// In unstaged mode, include files with worktree changes OR untracked files
-			relevantChange = fileStatus.Worktree != git.Unmodified || status.IsUntracked(path)
-		}
-
-		if !relevantChange {
+		if !isRelevantChange(mode, status, path, fileStatus) {
 			continue
 		}
 
@@ -275,162 +252,29 @@ func (gs *GitService) GetDiffWithContext(mode DiffMode, viewMode DiffViewMode, c
 
 // getFileDiff generates a FileDiff for a single file
 func (gs *GitService) getFileDiff(worktree *git.Worktree, idx *index.Index, headCommit *object.Commit, path string, mode DiffMode, viewMode DiffViewMode, contextLines int, fileStatus git.FileStatus, logger *Logger) (*FileDiff, error) {
-	var oldContent, newContent []byte
-	var changeType ChangeType
-
 	// Check if this is an untracked file (only in unstaged mode)
 	isUntracked := mode == Unstaged && (fileStatus.Worktree == git.Untracked)
+
+	var oldContent, newContent []byte
+	var err error
+	changeType := statusCodeToChangeType(statusCodeForMode(mode, fileStatus))
 
 	if isUntracked {
 		// For untracked files, show full file content as "new"
 		changeType = Added
-
-		// Read file from working tree
-		file, err := worktree.Filesystem.Open(path)
+		newContent, err = gs.readRequiredWorktreeContent(path, worktree, logger)
 		if err != nil {
-			return nil, fmt.Errorf("failed to open untracked file %s: %w", path, err)
+			return nil, err
 		}
-
-		newContent, err = readAll(file)
-		file.Close()
+	} else if mode == Staged {
+		oldContent, newContent, err = gs.readStagedContents(path, idx, headCommit, logger)
 		if err != nil {
-			return nil, fmt.Errorf("failed to read untracked file %s: %w", path, err)
+			return nil, err
 		}
-
-		if len(newContent) > MaxFileSize {
-			if logger != nil {
-				logger.Warn("Untracked file too large to display", map[string]interface{}{
-					"file": path,
-					"size": len(newContent),
-					"max":  MaxFileSize,
-				})
-			}
-			return nil, fmt.Errorf("untracked file %s too large to display (%d > %d)", path, len(newContent), MaxFileSize)
-		}
-
-		// oldContent remains empty (file doesn't exist in git history)
 	} else {
-		// Determine change type for tracked files
-		var statusCode string
-		if mode == Staged {
-			statusCode = string(fileStatus.Staging)
-		} else {
-			statusCode = string(fileStatus.Worktree)
-		}
-
-		switch statusCode {
-		case "M":
-			changeType = Modified
-		case "A":
-			changeType = Added
-		case "D":
-			changeType = Deleted
-		case "R":
-			changeType = Renamed
-		default:
-			changeType = Modified
-		}
-
-		if mode == Staged {
-			// Staged: compare index vs HEAD
-			oldFile, err := headCommit.File(path)
-			if err == nil {
-				oldReader, err := oldFile.Reader()
-				if err == nil {
-					oldContent, err = readAll(oldReader)
-					oldReader.Close()
-					if err != nil {
-						return nil, fmt.Errorf("failed to read old file %s: %w", path, err)
-					}
-					if len(oldContent) > MaxFileSize {
-						if logger != nil {
-							logger.Warn("File too large to diff", map[string]interface{}{
-								"file": path,
-								"size": len(oldContent),
-								"max":  MaxFileSize,
-							})
-						}
-						return nil, fmt.Errorf("file %s too large to diff (%d > %d)", path, len(oldContent), MaxFileSize)
-					}
-				}
-			}
-
-			// Get new content from index
-			for _, entry := range idx.Entries {
-				if entry.Name == path {
-					newBlob, err := object.GetBlob(gs.repo.Storer, entry.Hash)
-					if err == nil {
-						newReader, err := newBlob.Reader()
-						if err == nil {
-							newContent, err = readAll(newReader)
-							newReader.Close()
-							if err != nil {
-								return nil, fmt.Errorf("failed to read new file %s from index: %w", path, err)
-							}
-							if len(newContent) > MaxFileSize {
-								if logger != nil {
-									logger.Warn("File too large to diff", map[string]interface{}{
-										"file": path,
-										"size": len(newContent),
-										"max":  MaxFileSize,
-									})
-								}
-								return nil, fmt.Errorf("file %s too large to diff (%d > %d)", path, len(newContent), MaxFileSize)
-							}
-						}
-					}
-					break
-				}
-			}
-		} else {
-			// Unstaged: compare worktree vs index
-			// Get old content from index
-			for _, entry := range idx.Entries {
-				if entry.Name == path {
-					oldBlob, err := object.GetBlob(gs.repo.Storer, entry.Hash)
-					if err == nil {
-						oldReader, err := oldBlob.Reader()
-						if err == nil {
-							oldContent, err = readAll(oldReader)
-							oldReader.Close()
-							if err != nil {
-								return nil, fmt.Errorf("failed to read old file %s from index: %w", path, err)
-							}
-							if len(oldContent) > MaxFileSize {
-								if logger != nil {
-									logger.Warn("File too large to diff", map[string]interface{}{
-										"file": path,
-										"size": len(oldContent),
-										"max":  MaxFileSize,
-									})
-								}
-								return nil, fmt.Errorf("file %s too large to diff (%d > %d)", path, len(oldContent), MaxFileSize)
-							}
-						}
-					}
-					break
-				}
-			}
-
-			// Get new content from worktree
-			worktreeFile, err := worktree.Filesystem.Open(path)
-			if err == nil {
-				newContent, err = readAll(worktreeFile)
-				worktreeFile.Close()
-				if err != nil {
-					return nil, fmt.Errorf("failed to read new file %s from worktree: %w", path, err)
-				}
-				if len(newContent) > MaxFileSize {
-					if logger != nil {
-						logger.Warn("File too large to diff", map[string]interface{}{
-							"file": path,
-							"size": len(newContent),
-							"max":  MaxFileSize,
-						})
-					}
-					return nil, fmt.Errorf("file %s too large to diff (%d > %d)", path, len(newContent), MaxFileSize)
-				}
-			}
+		oldContent, newContent, err = gs.readUnstagedContents(path, idx, worktree, logger)
+		if err != nil {
+			return nil, err
 		}
 	}
 
@@ -458,46 +302,173 @@ func (gs *GitService) getFileDiff(worktree *git.Worktree, idx *index.Index, head
 	}
 	fileDiff.Hunks = hunks
 
-	// Count lines
-	for _, hunk := range hunks {
-		for _, line := range hunk.Lines {
-			if line.Type == LineAdded {
-				fileDiff.LinesAdded++
-			} else if line.Type == LineRemoved {
-				fileDiff.LinesRemoved++
-			}
-		}
-	}
+	fileDiff.LinesAdded, fileDiff.LinesRemoved = countHunkLineStats(hunks)
 
 	return fileDiff, nil
 }
 
-// GetDefaultBranch returns the default branch name (main or master)
-func (gs *GitService) GetDefaultBranch() (string, error) {
-	// Check for common default branch names
-	defaultBranches := []string{"refs/heads/main", "refs/heads/master", "refs/heads/develop"}
+func (gs *GitService) readRequiredWorktreeContent(path string, worktree *git.Worktree, logger *Logger) ([]byte, error) {
+	file, err := worktree.Filesystem.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open untracked file %s: %w", path, err)
+	}
+	content, err := readAll(file)
+	file.Close()
+	if err != nil {
+		return nil, fmt.Errorf("failed to read untracked file %s: %w", path, err)
+	}
+	if err := enforceSizeLimit(path, content, logger, "Untracked file too large to display", "untracked file %s too large to display (%d > %d)"); err != nil {
+		return nil, err
+	}
+	return content, nil
+}
 
-	for _, refName := range defaultBranches {
-		ref, err := gs.repo.Reference(plumbing.ReferenceName(refName), false)
-		if err == nil && ref != nil {
-			return ref.Name().Short(), nil
+func (gs *GitService) readStagedContents(path string, idx *index.Index, headCommit *object.Commit, logger *Logger) ([]byte, []byte, error) {
+	oldContent, err := gs.readHeadContentIfPresent(path, headCommit, logger)
+	if err != nil {
+		return nil, nil, err
+	}
+	newContent, err := gs.readIndexContentIfPresent(path, idx, logger, "failed to read new file %s from index: %w")
+	if err != nil {
+		return nil, nil, err
+	}
+	return oldContent, newContent, nil
+}
+
+func (gs *GitService) readUnstagedContents(path string, idx *index.Index, worktree *git.Worktree, logger *Logger) ([]byte, []byte, error) {
+	oldContent, err := gs.readIndexContentIfPresent(path, idx, logger, "failed to read old file %s from index: %w")
+	if err != nil {
+		return nil, nil, err
+	}
+	newContent, err := gs.readWorktreeContentIfPresent(path, worktree, logger)
+	if err != nil {
+		return nil, nil, err
+	}
+	return oldContent, newContent, nil
+}
+
+func (gs *GitService) readHeadContentIfPresent(path string, headCommit *object.Commit, logger *Logger) ([]byte, error) {
+	if headCommit == nil {
+		return nil, nil
+	}
+	oldFile, err := headCommit.File(path)
+	if err != nil {
+		return nil, nil
+	}
+	oldReader, err := oldFile.Reader()
+	if err != nil {
+		return nil, nil
+	}
+	content, err := readAll(oldReader)
+	oldReader.Close()
+	if err != nil {
+		return nil, fmt.Errorf("failed to read old file %s: %w", path, err)
+	}
+	if err := enforceSizeLimit(path, content, logger, "File too large to diff", "file %s too large to diff (%d > %d)"); err != nil {
+		return nil, err
+	}
+	return content, nil
+}
+
+func (gs *GitService) readIndexContentIfPresent(path string, idx *index.Index, logger *Logger, readErrFmt string) ([]byte, error) {
+	for _, entry := range idx.Entries {
+		if entry.Name != path {
+			continue
+		}
+
+		blob, err := object.GetBlob(gs.repo.Storer, entry.Hash)
+		if err != nil {
+			return nil, nil
+		}
+		reader, err := blob.Reader()
+		if err != nil {
+			return nil, nil
+		}
+
+		content, err := readAll(reader)
+		reader.Close()
+		if err != nil {
+			return nil, fmt.Errorf(readErrFmt, path, err)
+		}
+		if err := enforceSizeLimit(path, content, logger, "File too large to diff", "file %s too large to diff (%d > %d)"); err != nil {
+			return nil, err
+		}
+		return content, nil
+	}
+	return nil, nil
+}
+
+func (gs *GitService) readWorktreeContentIfPresent(path string, worktree *git.Worktree, logger *Logger) ([]byte, error) {
+	file, err := worktree.Filesystem.Open(path)
+	if err != nil {
+		return nil, nil
+	}
+	content, err := readAll(file)
+	file.Close()
+	if err != nil {
+		return nil, fmt.Errorf("failed to read new file %s from worktree: %w", path, err)
+	}
+	if err := enforceSizeLimit(path, content, logger, "File too large to diff", "file %s too large to diff (%d > %d)"); err != nil {
+		return nil, err
+	}
+	return content, nil
+}
+
+func enforceSizeLimit(path string, content []byte, logger *Logger, warnMsg, errFmt string) error {
+	if len(content) <= MaxFileSize {
+		return nil
+	}
+	if logger != nil {
+		logger.Warn(warnMsg, map[string]interface{}{
+			"file": path,
+			"size": len(content),
+			"max":  MaxFileSize,
+		})
+	}
+	return fmt.Errorf(errFmt, path, len(content), MaxFileSize)
+}
+
+func countHunkLineStats(hunks []Hunk) (added int, removed int) {
+	for _, hunk := range hunks {
+		for _, line := range hunk.Lines {
+			if line.Type == LineAdded {
+				added++
+			} else if line.Type == LineRemoved {
+				removed++
+			}
 		}
 	}
+	return added, removed
+}
 
-	// Fallback to checking origin
-	originMain, err := gs.repo.Reference(plumbing.ReferenceName("refs/remotes/origin/main"), false)
-	if err == nil && originMain != nil {
-		return "main", nil
+func branchRefCandidates(branch string) []plumbing.ReferenceName {
+	return []plumbing.ReferenceName{
+		plumbing.ReferenceName("refs/heads/" + branch),
+		plumbing.ReferenceName("refs/remotes/origin/" + branch),
 	}
+}
 
-	originMaster, err := gs.repo.Reference(plumbing.ReferenceName("refs/remotes/origin/master"), false)
-	if err == nil && originMaster != nil {
-		return "master", nil
+func (gs *GitService) resolveBranchRef(branch string, resolved bool) (*plumbing.Reference, error) {
+	var lastErr error
+	for _, refName := range branchRefCandidates(branch) {
+		ref, err := gs.repo.Reference(refName, resolved)
+		if err == nil && ref != nil {
+			return ref, nil
+		}
+		lastErr = err
 	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("branch not found: %s", branch)
+	}
+	return nil, lastErr
+}
 
-	originDevelop, err := gs.repo.Reference(plumbing.ReferenceName("refs/remotes/origin/develop"), false)
-	if err == nil && originDevelop != nil {
-		return "develop", nil
+// GetDefaultBranch returns the default branch name (main or master)
+func (gs *GitService) GetDefaultBranch() (string, error) {
+	for _, branch := range []string{"main", "master", "develop"} {
+		if _, err := gs.resolveBranchRef(branch, false); err == nil {
+			return branch, nil
+		}
 	}
 
 	// Default to main if nothing else found
@@ -527,14 +498,10 @@ func (gs *GitService) GetCommitsAheadOfMain() ([]Commit, error) {
 		return nil, fmt.Errorf("failed to get current branch reference: %w", err)
 	}
 
-	// Get default branch reference
-	defaultRef, err := gs.repo.Reference(plumbing.ReferenceName("refs/heads/"+defaultBranch), true)
+	// Get default branch reference.
+	defaultRef, err := gs.resolveBranchRef(defaultBranch, true)
 	if err != nil {
-		// Default branch might not exist locally, try to get from HEAD
-		defaultRef, err = gs.repo.Reference(plumbing.ReferenceName("refs/remotes/origin/"+defaultBranch), true)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get default branch reference: %w", err)
-		}
+		return nil, fmt.Errorf("failed to get default branch reference: %w", err)
 	}
 
 	// Get commit objects
@@ -735,17 +702,7 @@ func (gs *GitService) GetUnifiedBranchCompareDiff(viewMode DiffViewMode, context
 			changeType = Deleted
 		}
 
-		linesAdded := 0
-		linesRemoved := 0
-		for _, hunk := range hunks {
-			for _, line := range hunk.Lines {
-				if line.Type == LineAdded {
-					linesAdded++
-				} else if line.Type == LineRemoved {
-					linesRemoved++
-				}
-			}
-		}
+		linesAdded, linesRemoved := countHunkLineStats(hunks)
 
 		files = append(files, FileDiff{
 			Path:         path,
@@ -765,12 +722,9 @@ func (gs *GitService) getDefaultBranchCommit() (*object.Commit, error) {
 		return nil, err
 	}
 
-	ref, err := gs.repo.Reference(plumbing.ReferenceName("refs/heads/"+defaultBranch), true)
+	ref, err := gs.resolveBranchRef(defaultBranch, true)
 	if err != nil {
-		ref, err = gs.repo.Reference(plumbing.ReferenceName("refs/remotes/origin/"+defaultBranch), true)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get default branch reference: %w", err)
-		}
+		return nil, fmt.Errorf("failed to get default branch reference: %w", err)
 	}
 
 	commit, err := gs.repo.CommitObject(ref.Hash())
@@ -949,18 +903,7 @@ func (gs *GitService) GetCommitDiff(commitHash string, logger *Logger) ([]FileDi
 			continue
 		}
 
-		// Count lines
-		linesAdded := 0
-		linesRemoved := 0
-		for _, hunk := range hunks {
-			for _, line := range hunk.Lines {
-				if line.Type == LineAdded {
-					linesAdded++
-				} else if line.Type == LineRemoved {
-					linesRemoved++
-				}
-			}
-		}
+		linesAdded, linesRemoved := countHunkLineStats(hunks)
 
 		if logger != nil {
 			logger.Info("Processed file patch", map[string]interface{}{
