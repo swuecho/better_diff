@@ -555,11 +555,7 @@ func (m *Model) moveDiffToBottom() {
 
 func (m Model) visibleContentRows() int {
 	// Terminal rows minus header/footer rows and panel border rows.
-	rows := m.height - 5
-	if rows < 1 {
-		rows = 1
-	}
-	return rows
+	return panelContentHeight(contentHeight(m.height, m.searchMode))
 }
 
 // getDiffLineCount returns the total number of lines in the current diff

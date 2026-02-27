@@ -44,10 +44,6 @@ func clamp(value, lower, upper int) int {
 	return value
 }
 
-func panelContentHeight(height int) int {
-	return max(0, height-2)
-}
-
 func visibleRange(start, window, length int) (int, int) {
 	start = clamp(start, 0, length)
 	end := min(start+window, length)

@@ -7,12 +7,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-const (
-	headerRows      = 2
-	headerSearchRows = 1 // Extra rows when search bar is visible
-	footerRows      = 1
-)
-
 // View implements tea.Model
 func (m Model) View() string {
 	if m.quitting {
@@ -25,20 +19,13 @@ func (m Model) View() string {
 	}
 
 	// Calculate dimensions
-	headerHeight := headerRows
-	if m.searchMode {
-		headerHeight += headerSearchRows
-	}
-	contentHeight := m.height - headerHeight - footerRows
-	if contentHeight < 1 {
-		contentHeight = 1
-	}
+	availHeight := contentHeight(m.height, m.searchMode)
 
 	// Create header
 	header := m.renderHeader()
 
 	// Create main content (split view)
-	content := m.renderContent(contentHeight)
+	content := m.renderContent(availHeight)
 
 	// Create footer
 	footer := m.renderFooter()
@@ -109,8 +96,8 @@ func (m Model) renderContent(height int) string {
 	}
 
 	// Split into two panels - left panel gets 1/3, right panel gets 2/3
-	leftPanelWidth := m.width / 3
-	rightPanelWidth := m.width - leftPanelWidth
+	leftPanelWidth := fileTreeWidth(m.width)
+	rightPanelWidth := diffPanelWidth(m.width)
 
 	leftPanel := m.renderFileTree(leftPanelWidth, height)
 	rightPanel := m.renderDiffPanel(rightPanelWidth, height)
@@ -299,9 +286,9 @@ func renderDiffLineNumbers(diffLine DiffLine) string {
 // formatLineNumber formats a line number for display
 func formatLineNumber(num int) string {
 	if num == 0 {
-		return strings.Repeat(" ", 4) // 4 spaces for alignment when no line number
+		return strings.Repeat(" ", lineNumWidth) // spaces for alignment when no line number
 	}
-	return fmt.Sprintf("%4d", num)
+	return fmt.Sprintf("%*d", lineNumWidth, num)
 }
 
 func (m Model) renderFooter() string {
