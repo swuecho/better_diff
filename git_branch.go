@@ -82,9 +82,9 @@ func (gs *GitService) GetCommitsAheadOfMain() ([]Commit, error) {
 		return nil, err
 	}
 
-	if !foundMergeBase && len(commits) > 50 {
+	if !foundMergeBase && len(commits) > maxCommitsAhead {
 		// Branches diverged and merge base was not reached in traversal.
-		return commits[:50], nil
+		return commits[:maxCommitsAhead], nil
 	}
 	return commits, nil
 }

@@ -76,8 +76,7 @@ func (m Model) renderHelp() string {
 	}
 
 	// Calculate modal dimensions
-	modalWidth := min(60, m.width-4)
-	modalHeight := min(30, m.height-4)
+	modalWidth, modalHeight := helpModalDimensions(m.width, m.height)
 
 	// Create modal style
 	modalStyle := lipgloss.NewStyle().
