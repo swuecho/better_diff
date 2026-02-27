@@ -282,7 +282,26 @@ func renderDiffLine(diffLine DiffLine) string {
 		contentStyle = diffContextStyle
 	}
 
-	return prefixStyle.Render(prefix) + " " + contentStyle.Render(diffLine.Content)
+	// Render line numbers
+	lineNums := renderDiffLineNumbers(diffLine)
+
+	return lineNums + prefixStyle.Render(prefix) + " " + contentStyle.Render(diffLine.Content)
+}
+
+// renderDiffLineNumbers renders the old and new line numbers for a diff line
+func renderDiffLineNumbers(diffLine DiffLine) string {
+	oldNum := formatLineNumber(diffLine.OldLineNum)
+	newNum := formatLineNumber(diffLine.NewLineNum)
+
+	return diffLineNumStyle.Render(oldNum+" "+newNum) + " "
+}
+
+// formatLineNumber formats a line number for display
+func formatLineNumber(num int) string {
+	if num == 0 {
+		return strings.Repeat(" ", 4) // 4 spaces for alignment when no line number
+	}
+	return fmt.Sprintf("%4d", num)
 }
 
 func (m Model) renderFooter() string {

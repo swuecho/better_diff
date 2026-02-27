@@ -1093,9 +1093,10 @@ func convertPatchToHunks(filePatch diff.FilePatch) ([]Hunk, error) {
 			}
 
 			currentHunk.Lines = append(currentHunk.Lines, DiffLine{
-				Type:    lineType,
-				Content: contentStr,
-				LineNum: 0,
+				Type:       lineType,
+				Content:    contentStr,
+				OldLineNum: 0,
+				NewLineNum: 0,
 			})
 		}
 
