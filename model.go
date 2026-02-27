@@ -17,9 +17,10 @@ const (
 
 // Model holds the application state
 type Model struct {
-	git            *GitService // Git service (dependency injection)
-	logger         *Logger     // Logger for error tracking
-	watcher        *Watcher    // File system watcher
+	git            *GitService      // Git service (dependency injection)
+	logger         *Logger          // Logger for error tracking
+	watcher        *Watcher         // File system watcher
+	highlighter    *SyntaxHighlighter // Syntax highlighter
 	files          []FileDiff
 	diffFiles      []FileDiff // Files with full diff content
 	fileTree       []TreeNode
@@ -70,6 +71,7 @@ func NewModel(gitService *GitService, logger *Logger) Model {
 	return Model{
 		git:          gitService,
 		logger:       logger,
+		highlighter:  NewSyntaxHighlighter(),
 		panel:        FileTreePanel,
 		diffMode:     Unstaged,
 		diffViewMode: DiffOnly,

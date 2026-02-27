@@ -202,7 +202,7 @@ func (m Model) buildDiffPanelLines() []string {
 	}
 
 	for fileIdx, selectedFile := range filesToRender {
-		lines = appendRenderedFileDiffLines(lines, selectedFile, fileIdx > 0)
+		lines = m.appendRenderedFileDiffLines(lines, selectedFile, fileIdx > 0)
 	}
 	return lines
 }
@@ -227,7 +227,7 @@ func visiblePaddedLines(allLines []string, scrollOffset, height int) []string {
 	return lines
 }
 
-func appendRenderedFileDiffLines(lines []string, file *FileDiff, withSeparator bool) []string {
+func (m Model) appendRenderedFileDiffLines(lines []string, file *FileDiff, withSeparator bool) []string {
 	if withSeparator {
 		lines = append(lines, "")
 		lines = append(lines, diffHunkStyle.Render("════════════════════════════════════"))
@@ -241,13 +241,13 @@ func appendRenderedFileDiffLines(lines []string, file *FileDiff, withSeparator b
 	for _, hunk := range file.Hunks {
 		lines = append(lines, diffHunkStyle.Render("─"))
 		for _, diffLine := range hunk.Lines {
-			lines = append(lines, renderDiffLine(diffLine))
+			lines = append(lines, m.renderDiffLine(diffLine, file.Path))
 		}
 	}
 	return lines
 }
 
-func renderDiffLine(diffLine DiffLine) string {
+func (m Model) renderDiffLine(diffLine DiffLine, filePath string) string {
 	var (
 		prefix       string
 		prefixStyle  lipgloss.Style
@@ -272,7 +272,13 @@ func renderDiffLine(diffLine DiffLine) string {
 	// Render line numbers
 	lineNums := renderDiffLineNumbers(diffLine)
 
-	return lineNums + prefixStyle.Render(prefix) + " " + contentStyle.Render(diffLine.Content)
+	// Apply syntax highlighting to content
+	content := diffLine.Content
+	if m.highlighter != nil {
+		content = m.highlighter.Highlight(diffLine.Content, filePath)
+	}
+
+	return lineNums + prefixStyle.Render(prefix) + " " + contentStyle.Render(content)
 }
 
 // renderDiffLineNumbers renders the old and new line numbers for a diff line
