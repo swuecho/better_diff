@@ -41,6 +41,9 @@ type Model struct {
 	lastFileHash   string // To detect changes in files
 	vimPendingG    bool   // Tracks first "g" for "gg" in whole-file navigation
 	diffContext    int    // Context lines in Diff Only mode
+	// Search state
+	searchMode  bool   // Whether search input is active
+	searchQuery string // Current search query
 }
 
 var errGitServiceNotInitialized = errors.New("git service not initialized")

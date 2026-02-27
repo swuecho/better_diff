@@ -8,8 +8,9 @@ import (
 )
 
 const (
-	headerRows = 2
-	footerRows = 1
+	headerRows      = 2
+	headerSearchRows = 1 // Extra rows when search bar is visible
+	footerRows      = 1
 )
 
 // View implements tea.Model
@@ -24,7 +25,11 @@ func (m Model) View() string {
 	}
 
 	// Calculate dimensions
-	contentHeight := m.height - headerRows - footerRows
+	headerHeight := headerRows
+	if m.searchMode {
+		headerHeight += headerSearchRows
+	}
+	contentHeight := m.height - headerHeight - footerRows
 	if contentHeight < 1 {
 		contentHeight = 1
 	}
@@ -64,14 +69,37 @@ func (m Model) renderHeader() string {
 		parts = append(parts, statsSubtleStyle.Render("("+stats+")"))
 	}
 
-	if !m.showHelp {
+	// Show search indicator or help hint
+	if m.searchQuery != "" {
+		filtered := len(m.flattenTree())
+		parts = append(parts, searchIndicatorStyle.Render(fmt.Sprintf("Filter: %q (%d)", m.searchQuery, filtered)))
+	} else if !m.showHelp {
 		parts = append(parts, subtleStyle.Render("Press ? for help"))
 	}
 
 	header := strings.Join(parts, " ")
+
+	// Show search input bar if in search mode
+	if m.searchMode {
+		searchBar := m.renderSearchBar()
+		separator := headerSeparatorStyle.Render(strings.Repeat("─", m.width))
+		return lipgloss.JoinVertical(lipgloss.Left, header, separator, searchBar)
+	}
+
 	separator := headerSeparatorStyle.Render(strings.Repeat("─", m.width))
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, separator)
+}
+
+// renderSearchBar renders the search input bar
+func (m Model) renderSearchBar() string {
+	prompt := searchPromptStyle.Render("Search: ")
+	query := searchQueryStyle.Render(m.searchQuery)
+	cursor := searchCursorStyle.Render("█")
+	hint := subtleStyle.Render("  [Enter] confirm  [Esc] cancel  [Backspace] delete")
+
+	searchLine := prompt + query + cursor + hint
+	return searchLineStyle.Width(m.width).Render(searchLine)
 }
 
 func (m Model) renderContent(height int) string {
@@ -281,11 +309,20 @@ func (m Model) footerHelpItems() []string {
 }
 
 func (m Model) contextualFooterHelp() []string {
+	if m.searchMode {
+		return []string{
+			footerKeyStyle.Render("[type]") + " Filter files",
+			footerKeyStyle.Render("[Enter]") + " Confirm",
+			footerKeyStyle.Render("[Esc]") + " Cancel",
+		}
+	}
+
 	if m.panel == FileTreePanel {
 		return []string{
 			footerKeyStyle.Render("[↑↓/j/k]") + " Navigate",
 			footerKeyStyle.Render("[PgUp/PgDn]") + " Page",
 			footerKeyStyle.Render("[Enter]") + " Select/Expand",
+			footerKeyStyle.Render("[/]") + " Search",
 		}
 	}
 

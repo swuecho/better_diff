@@ -195,6 +195,27 @@ var (
 				Foreground(colorRed196).
 				Bold(true).
 				Padding(0, 1)
+
+	// Search styles
+	searchIndicatorStyle = lipgloss.NewStyle().
+				Foreground(colorSoftBlue75).
+				Bold(true)
+
+	searchPromptStyle = lipgloss.NewStyle().
+				Foreground(colorYellow).
+				Bold(true)
+
+	searchQueryStyle = lipgloss.NewStyle().
+				Foreground(colorWhite).
+				Bold(true)
+
+	searchCursorStyle = lipgloss.NewStyle().
+				Foreground(colorGreen86).
+				Bold(true)
+
+	searchLineStyle = lipgloss.NewStyle().
+				Background(colorGray235).
+				Padding(0, 1)
 )
 
 // GetStatusStyle returns the appropriate style for a change type

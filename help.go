@@ -33,6 +33,12 @@ var keyBindings = []KeyBinding{
 	{"s", "Toggle unstaged/staged/branch compare", "Actions"},
 	{"f", "Toggle diff/whole file view", "Actions"},
 
+	// Search
+	{"/", "Search/filter files in file tree", "Search"},
+	{"enter", "Confirm search", "Search"},
+	{"esc", "Cancel search", "Search"},
+	{"backspace", "Delete character in search", "Search"},
+
 	// Panels
 	{"tab", "Switch between file tree and diff", "Panels"},
 

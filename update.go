@@ -5,6 +5,7 @@ import (
 	"hash"
 	"hash/fnv"
 	"sort"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -67,12 +68,57 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
+	// Handle search mode input
+	if m.searchMode {
+		return m.handleSearchInput(key, msg)
+	}
+
 	m.resetPendingVimTopJumpIfNeeded(key)
 	if m.shouldIgnoreKey(key) {
 		return m, nil
 	}
 
 	return m, m.runKeyAction(key)
+}
+
+// handleSearchInput handles keyboard input when in search mode
+func (m *Model) handleSearchInput(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch key {
+	case "esc", "ctrl+c":
+		// Cancel search
+		m.searchMode = false
+		m.searchQuery = ""
+		m.selectedIndex = 0
+		m.scrollOffset = 0
+		return m, nil
+	case "enter":
+		// Confirm search (exit mode but keep filter)
+		m.searchMode = false
+		m.selectedIndex = 0
+		m.scrollOffset = 0
+		return m, nil
+	case "backspace":
+		// Delete last character
+		if len(m.searchQuery) > 0 {
+			m.searchQuery = m.searchQuery[:len(m.searchQuery)-1]
+			m.selectedIndex = 0
+			m.scrollOffset = 0
+		}
+		return m, nil
+	default:
+		// Add printable character to search query
+		if len(msg.Runes) > 0 && isPrintableRune(msg.Runes[0]) {
+			m.searchQuery += string(msg.Runes)
+			m.selectedIndex = 0
+			m.scrollOffset = 0
+		}
+		return m, nil
+	}
+}
+
+// isPrintableRune checks if a rune is a printable character (not a control character)
+func isPrintableRune(r rune) bool {
+	return r >= 32 && r < 127
 }
 
 func (m *Model) runKeyAction(key string) tea.Cmd {
@@ -105,7 +151,18 @@ func (m *Model) runKeyAction(key string) tea.Cmd {
 		return m.resetDiffContext()
 	case "?":
 		m.toggleHelp()
+	case "/":
+		return m.enterSearchMode()
 	}
+	return nil
+}
+
+// enterSearchMode activates search mode for file tree filtering
+func (m *Model) enterSearchMode() tea.Cmd {
+	if m.panel != FileTreePanel || m.diffViewMode == WholeFile {
+		return nil
+	}
+	m.searchMode = true
 	return nil
 }
 
@@ -232,6 +289,9 @@ func (m *Model) resetDiffContext() tea.Cmd {
 func (m *Model) toggleDiffMode() tea.Cmd {
 	m.diffMode = nextDiffMode(m.diffMode)
 	m.resetSelectionAndLoadedData()
+	// Clear search when changing modes
+	m.searchQuery = ""
+	m.searchMode = false
 	return m.reloadByDiffMode()
 }
 
@@ -245,6 +305,9 @@ func (m *Model) toggleDiffViewMode() tea.Cmd {
 
 	m.diffScroll = 0
 	m.diffFiles = nil
+	// Clear search when changing view modes
+	m.searchQuery = ""
+	m.searchMode = false
 
 	return m.reloadDiffsForCurrentMode()
 }
@@ -636,9 +699,49 @@ func (m *Model) toggleDirectory(path string) {
 
 // flattenTree flattens the tree for navigation
 func (m *Model) flattenTree() []TreeNode {
-	result := make([]TreeNode, 0, len(m.fileTree))
-	appendFlattenedTree(&result, m.fileTree, 0)
+	tree := m.fileTree
+	if m.searchQuery != "" {
+		tree = m.filterTree(m.fileTree, m.searchQuery)
+	}
+	result := make([]TreeNode, 0, len(tree))
+	appendFlattenedTree(&result, tree, 0)
 	return result
+}
+
+// filterTree filters the tree nodes based on search query
+func (m *Model) filterTree(nodes []TreeNode, query string) []TreeNode {
+	if query == "" {
+		return nodes
+	}
+
+	query = strings.ToLower(query)
+	var filtered []TreeNode
+
+	for _, node := range nodes {
+		if node.isDir {
+			// For directories, check if any children match
+			filteredChildren := m.filterTree(node.children, query)
+			if len(filteredChildren) > 0 || strings.Contains(strings.ToLower(node.name), query) {
+				filtered = append(filtered, TreeNode{
+					name:         node.name,
+					path:         node.path,
+					isDir:        true,
+					isExpanded:   true, // Always expand filtered results
+					children:     filteredChildren,
+					changeType:   node.changeType,
+					linesAdded:   node.linesAdded,
+					linesRemoved: node.linesRemoved,
+				})
+			}
+		} else {
+			// For files, check if name matches query
+			if strings.Contains(strings.ToLower(node.name), query) || strings.Contains(strings.ToLower(node.path), query) {
+				filtered = append(filtered, node)
+			}
+		}
+	}
+
+	return filtered
 }
 
 func toggleDirectoryInNodes(nodes []TreeNode, path string) bool {
