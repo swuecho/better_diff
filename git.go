@@ -44,9 +44,10 @@ type Hunk struct {
 
 // DiffLine represents a single line in a diff
 type DiffLine struct {
-	Type    LineType
-	Content string
-	LineNum int // 0 for context lines
+	Type       LineType
+	Content    string
+	OldLineNum int // Line number in the old file (0 if added)
+	NewLineNum int // Line number in the new file (0 if removed)
 }
 
 // LineType represents the type of line in a diff
@@ -177,8 +178,10 @@ func (b *hunkBuilder) processEqualLines(lines []string) {
 
 	for _, line := range lines {
 		b.currentHunk.Lines = append(b.currentHunk.Lines, DiffLine{
-			Type:    LineContext,
-			Content: line,
+			Type:       LineContext,
+			Content:    line,
+			OldLineNum: b.oldLineNum,
+			NewLineNum: b.newLineNum,
 		})
 		b.oldLineNum++
 		b.newLineNum++
@@ -191,8 +194,10 @@ func (b *hunkBuilder) processRemovedLines(lines []string) {
 	b.ensureCurrentHunk(len(lines))
 	for _, line := range lines {
 		b.currentHunk.Lines = append(b.currentHunk.Lines, DiffLine{
-			Type:    LineRemoved,
-			Content: line,
+			Type:       LineRemoved,
+			Content:    line,
+			OldLineNum: b.oldLineNum,
+			NewLineNum: 0,
 		})
 		b.oldLineNum++
 	}
@@ -202,8 +207,10 @@ func (b *hunkBuilder) processAddedLines(lines []string) {
 	b.ensureCurrentHunk(len(lines))
 	for _, line := range lines {
 		b.currentHunk.Lines = append(b.currentHunk.Lines, DiffLine{
-			Type:    LineAdded,
-			Content: line,
+			Type:       LineAdded,
+			Content:    line,
+			OldLineNum: 0,
+			NewLineNum: b.newLineNum,
 		})
 		b.newLineNum++
 	}
@@ -339,10 +346,16 @@ func newHunkWithLeadingContext(pendingEqual []string, contextLines int, oldLineN
 		NewStart: newLineNum - len(leadingContext),
 	}
 
-	for _, line := range leadingContext {
+	// Calculate starting line numbers for leading context
+	oldStart := oldLineNum - len(leadingContext)
+	newStart := newLineNum - len(leadingContext)
+
+	for i, line := range leadingContext {
 		hunk.Lines = append(hunk.Lines, DiffLine{
-			Type:    LineContext,
-			Content: line,
+			Type:       LineContext,
+			Content:    line,
+			OldLineNum: oldStart + i,
+			NewLineNum: newStart + i,
 		})
 	}
 

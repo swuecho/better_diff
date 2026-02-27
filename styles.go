@@ -100,6 +100,9 @@ var (
 	diffContextStyle = lipgloss.NewStyle().
 				Foreground(colorGray245)
 
+	diffLineNumStyle = lipgloss.NewStyle().
+				Foreground(colorGray244)
+
 	diffSubtleStyle = lipgloss.NewStyle().
 			Foreground(colorGray244)
 
